@@ -101,6 +101,12 @@ prompt states), `--qsd_retention_coeff 0` (no retention), and
 `--qsd_no_cosine_prior` (QSD-only retrieval). During training/evaluation the
 logs expose `QSDEnt`, `QSDPur`, `QSDStr`, `RouteEnt`, and `QSDRet`.
 
+Every run also writes `results_summary.json` inside `--output_dir`. The file is
+updated after every task (so partial Kaggle runs remain readable) and contains
+final/average-incremental accuracy, forgetting, backward transfer, per-task
+accuracy, the complete accuracy matrix, runtime, and compact QSD diagnostics.
+A short summary with the same key metrics is printed when training finishes.
+
 ### Multinode train
 
 Distributed training is available via Slurm and [submitit](https://github.com/facebookincubator/submitit):

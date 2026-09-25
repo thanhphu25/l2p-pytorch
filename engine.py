@@ -25,6 +25,11 @@ from timm.utils import accuracy
 from timm.optim import create_optimizer
 
 import utils
+from result_summary import (
+    build_results_summary,
+    extract_router_metrics,
+    save_results_summary,
+)
 
 
 def _prompt_query_from_original(output):
@@ -181,6 +186,7 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
 def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, data_loader, 
                     device, task_id=-1, class_mask=None, acc_matrix=None, args=None,):
     stat_matrix = np.zeros((3, args.num_tasks)) # 3 for Acc@1, Acc@5, Loss
+    router_metrics = {name: [] for name in ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet')}
 
     for i in range(task_id+1):
         test_stats = evaluate(model=model, original_model=original_model, data_loader=data_loader[i]['val'], 
@@ -190,6 +196,10 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
         stat_matrix[1, i] = test_stats['Acc@5']
         stat_matrix[2, i] = test_stats['Loss']
 
+        for name in router_metrics:
+            if name in test_stats:
+                router_metrics[name].append(float(test_stats[name]))
+
         acc_matrix[i, task_id] = test_stats['Acc@1']
     
     avg_stat = np.divide(np.sum(stat_matrix, axis=1), task_id+1)
@@ -197,6 +207,8 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
     diagonal = np.diag(acc_matrix)
 
     result_str = "[Average accuracy till task{}]\tAcc@1: {:.4f}\tAcc@5: {:.4f}\tLoss: {:.4f}".format(task_id+1, avg_stat[0], avg_stat[1], avg_stat[2])
+    forgetting = 0.0
+    backward = 0.0
     if task_id > 0:
         forgetting = np.mean((np.max(acc_matrix, axis=1) -
                             acc_matrix[:, task_id])[:task_id])
@@ -205,7 +217,21 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
         result_str += "\tForgetting: {:.4f}\tBackward: {:.4f}".format(forgetting, backward)
     print(result_str)
 
-    return test_stats
+    task_summary = {
+        'task': int(task_id + 1),
+        'avg_acc1': float(avg_stat[0]),
+        'avg_acc5': float(avg_stat[1]),
+        'avg_loss': float(avg_stat[2]),
+        'forgetting': float(forgetting),
+        'backward_transfer': float(backward),
+        'current_task_acc1': float(acc_matrix[task_id, task_id]),
+        'per_task_acc1': [float(acc_matrix[i, task_id]) for i in range(task_id + 1)],
+        'eval_router_metrics': {
+            name: float(np.mean(values))
+            for name, values in router_metrics.items() if values
+        },
+    }
+    return test_stats, task_summary
 
 def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer, lr_scheduler, device: torch.device, 
@@ -213,6 +239,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
 
     # create matrix to save end-of-task accuracies 
     acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
+    task_summaries = []
 
     for task_id in range(args.num_tasks):
        # Transfer previous learned prompt params to the new prompt
@@ -272,8 +299,12 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             if lr_scheduler:
                 lr_scheduler.step(epoch)
 
-        test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader, device=device, 
-                                    task_id=task_id, class_mask=class_mask, acc_matrix=acc_matrix, args=args)
+        test_stats, task_summary = evaluate_till_now(
+            model=model, original_model=original_model, data_loader=data_loader,
+            device=device, task_id=task_id, class_mask=class_mask,
+            acc_matrix=acc_matrix, args=args)
+        task_summary['train_router_metrics'] = extract_router_metrics(train_stats)
+        task_summaries.append(task_summary)
 
         # Retain only the task's mean density state and measurement outcome.
         # Consolidate before checkpointing so evaluation-only runs restore the
@@ -303,3 +334,12 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         if args.output_dir and utils.is_main_process():
             with open(os.path.join(args.output_dir, '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))), 'a') as f:
                 f.write(json.dumps(log_stats) + '\n')
+
+            # Overwrite one compact file after every task. It remains useful if
+            # a long Kaggle run is interrupted before all tasks finish.
+            running_summary = build_results_summary(
+                args, task_summaries, acc_matrix, status='running')
+            save_results_summary(running_summary, args.output_dir)
+
+    return build_results_summary(
+        args, task_summaries, acc_matrix, status='completed')

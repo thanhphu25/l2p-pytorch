@@ -9,6 +9,7 @@
 import sys
 import argparse
 import datetime
+import os
 import random
 import numpy as np
 import time
@@ -23,6 +24,11 @@ from timm.optim import create_optimizer
 
 from datasets import build_continual_dataloader
 from engine import *
+from result_summary import (
+    build_results_summary,
+    print_results_summary,
+    save_results_summary,
+)
 import models
 import utils
 
@@ -99,6 +105,7 @@ def main(args):
 
     if args.eval:
         acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
+        task_summaries = []
 
         for task_id in range(args.num_tasks):
             checkpoint_path = os.path.join(args.output_dir, 'checkpoint/task{}_checkpoint.pth'.format(task_id+1))
@@ -109,8 +116,17 @@ def main(args):
             else:
                 print('No checkpoint found at:', checkpoint_path)
                 return
-            _ = evaluate_till_now(model, original_model, data_loader, device, 
-                                            task_id, class_mask, acc_matrix, args,)
+            _, task_summary = evaluate_till_now(
+                model, original_model, data_loader, device,
+                task_id, class_mask, acc_matrix, args,)
+            task_summaries.append(task_summary)
+
+        evaluation_summary = build_results_summary(
+            args, task_summaries, acc_matrix, status='evaluated')
+        summary_path = None
+        if utils.is_main_process():
+            summary_path = save_results_summary(evaluation_summary, args.output_dir)
+            print_results_summary(evaluation_summary, summary_path)
         
         return
 
@@ -140,13 +156,20 @@ def main(args):
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
 
-    train_and_evaluate(model, model_without_ddp, original_model,
+    experiment_summary = train_and_evaluate(model, model_without_ddp, original_model,
                     criterion, data_loader, optimizer, lr_scheduler,
                     device, class_mask, args)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print(f"Total training time: {total_time_str}")
+
+    experiment_summary['total_training_seconds'] = float(total_time)
+    experiment_summary['total_training_time'] = total_time_str
+    experiment_summary['trainable_parameters'] = int(n_parameters)
+    if utils.is_main_process():
+        summary_path = save_results_summary(experiment_summary, args.output_dir)
+        print_results_summary(experiment_summary, summary_path)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('L2P training and evaluation configs')
