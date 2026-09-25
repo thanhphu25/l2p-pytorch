@@ -73,6 +73,14 @@ def main(args):
         prompt_key_init=args.prompt_key_init,
         head_type=args.head_type,
         use_prompt_mask=args.use_prompt_mask,
+        prompt_router=args.prompt_router,
+        qsd_state_dim=args.qsd_state_dim,
+        qsd_rank=args.qsd_rank,
+        qsd_eps=args.qsd_eps,
+        qsd_cls_mix=args.qsd_cls_mix,
+        qsd_cosine_tau=args.qsd_cosine_tau,
+        qsd_memory_size=args.qsd_memory_size,
+        qsd_no_cosine_prior=args.qsd_no_cosine_prior,
     )
     original_model.to(device)
     model.to(device)  

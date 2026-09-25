@@ -335,7 +335,9 @@ class VisionTransformer(nn.Module):
             class_token=True, no_embed_class=False, fc_norm=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
             weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block,
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
-            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,):
+            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
+            prompt_router='cosine', qsd_state_dim=16, qsd_rank=4, qsd_eps=1e-4, qsd_cls_mix=0.5,
+            qsd_cosine_tau=0.1, qsd_memory_size=10, qsd_no_cosine_prior=False,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -395,7 +397,10 @@ class VisionTransformer(nn.Module):
         if prompt_length is not None and pool_size is not None and prompt_pool: 
             self.prompt = Prompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key, prompt_init=prompt_init,
                     prompt_pool=prompt_pool, prompt_key=prompt_key, pool_size=pool_size, top_k=top_k, batchwise_prompt=batchwise_prompt,
-                    prompt_key_init=prompt_key_init,)
+                    prompt_key_init=prompt_key_init, prompt_router=prompt_router, qsd_state_dim=qsd_state_dim,
+                    qsd_rank=qsd_rank, qsd_eps=qsd_eps, qsd_cls_mix=qsd_cls_mix,
+                    qsd_cosine_tau=qsd_cosine_tau, qsd_memory_size=qsd_memory_size,
+                    qsd_no_cosine_prior=qsd_no_cosine_prior,)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
@@ -454,7 +459,8 @@ class VisionTransformer(nn.Module):
             self.global_pool = global_pool
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
-    def forward_features(self, x, task_id=-1, cls_features=None, train=False):
+    def forward_features(self, x, task_id=-1, cls_features=None, train=False,
+                         prompt_query_tokens=None):
         x = self.patch_embed(x)
 
         if hasattr(self, 'prompt'):
@@ -467,7 +473,10 @@ class VisionTransformer(nn.Module):
                     prompt_mask = None
             else:
                 prompt_mask = None
-            res = self.prompt(x, prompt_mask=prompt_mask, cls_features=cls_features)
+            res = self.prompt(
+                x, prompt_mask=prompt_mask, cls_features=cls_features,
+                prompt_query_tokens=prompt_query_tokens,
+                update_router_memory=train)
             self.total_prompt_len = res['total_prompt_len']
             x = res['prompted_embedding']
         else:
@@ -510,8 +519,11 @@ class VisionTransformer(nn.Module):
         
         return res
 
-    def forward(self, x, task_id=-1, cls_features=None, train=False):
-        res = self.forward_features(x, task_id=task_id, cls_features=cls_features, train=train)
+    def forward(self, x, task_id=-1, cls_features=None, train=False,
+                prompt_query_tokens=None):
+        res = self.forward_features(
+            x, task_id=task_id, cls_features=cls_features, train=train,
+            prompt_query_tokens=prompt_query_tokens)
         res = self.forward_head(res)
         return res
 

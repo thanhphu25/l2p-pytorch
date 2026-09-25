@@ -91,6 +91,18 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--pull_constraint', default=True)
     subparsers.add_argument('--pull_constraint_coeff', default=0.1, type=float)
 
+    # Quantum state discrimination (QSD) prompt retrieval. Cosine stays the
+    # default so existing commands reproduce the unmodified L2P baseline.
+    subparsers.add_argument('--prompt_router', default='cosine', choices=['cosine', 'qsd'])
+    subparsers.add_argument('--qsd_state_dim', default=16, type=int)
+    subparsers.add_argument('--qsd_rank', default=4, type=int)
+    subparsers.add_argument('--qsd_eps', default=1e-4, type=float)
+    subparsers.add_argument('--qsd_cls_mix', default=0.5, type=float)
+    subparsers.add_argument('--qsd_cosine_tau', default=0.1, type=float)
+    subparsers.add_argument('--qsd_memory_size', default=10, type=int)
+    subparsers.add_argument('--qsd_retention_coeff', default=0.1, type=float)
+    subparsers.add_argument('--qsd_no_cosine_prior', action='store_true')
+
     # ViT parameters
     subparsers.add_argument('--global_pool', default='token', choices=['token', 'avg'], type=str, help='type of global pooling for final sequence')
     subparsers.add_argument('--head_type', default='prompt', choices=['token', 'gap', 'prompt', 'token+prompt'], type=str, help='input type of classification head')

@@ -26,6 +26,28 @@ from timm.optim import create_optimizer
 
 import utils
 
+
+def _prompt_query_from_original(output):
+    """Return frozen ViT patch tokens for QSD without retaining its graph."""
+    tokens = output.get('x')
+    if tokens is not None and tokens.ndim == 3 and tokens.shape[1] > 1:
+        return tokens[:, 1:]
+    return tokens
+
+
+def _update_router_metrics(metric_logger, output, batch_size):
+    names = {
+        'qsd_entropy': 'QSDEnt',
+        'qsd_purity': 'QSDPur',
+        'qsd_strength': 'QSDStr',
+        'route_entropy': 'RouteEnt',
+        'qsd_retention_loss': 'QSDRet',
+    }
+    for output_name, meter_name in names.items():
+        if output_name in output:
+            metric_logger.meters[meter_name].update(
+                output[output_name].detach().item(), n=batch_size)
+
 def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
@@ -48,12 +70,16 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
 
         with torch.no_grad():
             if original_model is not None:
-                output = original_model(input)
-                cls_features = output['pre_logits']
+                original_output = original_model(input)
+                cls_features = original_output['pre_logits']
+                prompt_query_tokens = _prompt_query_from_original(original_output)
             else:
                 cls_features = None
+                prompt_query_tokens = None
         
-        output = model(input, task_id=task_id, cls_features=cls_features, train=set_training_mode)
+        output = model(
+            input, task_id=task_id, cls_features=cls_features,
+            prompt_query_tokens=prompt_query_tokens, train=set_training_mode)
         logits = output['logits']
 
         # here is the trick to mask out classes of non-current tasks
@@ -66,6 +92,8 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
         loss = criterion(logits, target) # base criterion (CrossEntropyLoss)
         if args.pull_constraint and 'reduce_sim' in output:
             loss = loss - args.pull_constraint_coeff * output['reduce_sim']
+        if 'qsd_retention_loss' in output:
+            loss = loss + args.qsd_retention_coeff * output['qsd_retention_loss']
 
         acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
@@ -78,11 +106,13 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
         optimizer.step()
 
-        torch.cuda.synchronize()
+        if torch.cuda.is_available() and device.type == 'cuda':
+            torch.cuda.synchronize()
         metric_logger.update(Loss=loss.item())
         metric_logger.update(Lr=optimizer.param_groups[0]["lr"])
         metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
         metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
+        _update_router_metrics(metric_logger, output, input.shape[0])
         
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -110,12 +140,16 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             # compute output
 
             if original_model is not None:
-                output = original_model(input)
-                cls_features = output['pre_logits']
+                original_output = original_model(input)
+                cls_features = original_output['pre_logits']
+                prompt_query_tokens = _prompt_query_from_original(original_output)
             else:
                 cls_features = None
+                prompt_query_tokens = None
             
-            output = model(input, task_id=task_id, cls_features=cls_features)
+            output = model(
+                input, task_id=task_id, cls_features=cls_features,
+                prompt_query_tokens=prompt_query_tokens)
             logits = output['logits']
 
             if args.task_inc and class_mask is not None:
@@ -133,6 +167,7 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             metric_logger.meters['Loss'].update(loss.item())
             metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
             metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
+            _update_router_metrics(metric_logger, output, input.shape[0])
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -239,6 +274,13 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
 
         test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader, device=device, 
                                     task_id=task_id, class_mask=class_mask, acc_matrix=acc_matrix, args=args)
+
+        # Retain only the task's mean density state and measurement outcome.
+        # Consolidate before checkpointing so evaluation-only runs restore the
+        # exact continual-learning state.
+        if hasattr(model_without_ddp, 'prompt'):
+            model_without_ddp.prompt.consolidate_router()
+
         if args.output_dir and utils.is_main_process():
             Path(os.path.join(args.output_dir, 'checkpoint')).mkdir(parents=True, exist_ok=True)
             

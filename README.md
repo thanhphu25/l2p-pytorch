@@ -80,6 +80,27 @@ python -m torch.distributed.launch \
 
 Also available in <a href="https://slurm.schedmd.com/documentation.html">Slurm</a> system by changing options on `train_cifar100_l2p.sh` or `train_five_datasets.sh` properly.
 
+### Quantum-state prompt retrieval (experimental)
+
+The baseline cosine router remains the default. To enable quantum state
+discrimination (QSD) retrieval on Split-CIFAR100, add:
+
+```
+--prompt_router qsd --qsd_retention_coeff 0.1
+```
+
+QSD represents each image by a mixed density state built from the frozen ViT
+CLS and patch tokens, represents each prompt by a low-rank mixed state, and
+uses a pretty-good measurement (PGM/POVM) for retrieval. Its residual strength
+starts at zero, so the initial top-k is identical to cosine L2P. At every task
+boundary it retains one mean density state and measurement distribution (no
+images) for measurement-retention regularization.
+
+Useful ablations are `--qsd_cls_mix 1.0` (CLS only), `--qsd_rank 1` (pure
+prompt states), `--qsd_retention_coeff 0` (no retention), and
+`--qsd_no_cosine_prior` (QSD-only retrieval). During training/evaluation the
+logs expose `QSDEnt`, `QSDPur`, `QSDStr`, `RouteEnt`, and `QSDRet`.
+
 ### Multinode train
 
 Distributed training is available via Slurm and [submitit](https://github.com/facebookincubator/submitit):
