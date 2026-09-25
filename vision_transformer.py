@@ -335,7 +335,8 @@ class VisionTransformer(nn.Module):
             class_token=True, no_embed_class=False, fc_norm=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
             weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block,
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
-            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,):
+            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
+            prompt_gating='none', gate_tau=0.1, gate_qubits=3, gate_layers=2, gate_train_sim=False,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -360,6 +361,7 @@ class VisionTransformer(nn.Module):
             act_layer: (nn.Module): MLP activation layer
             block_fn: (nn.Module): transformer block
             prompt_pool (bool): use prompt pool or not
+            prompt_gating (str): reweighting of the selected prompts ('none', 'softmax', 'linear', 'quantum')
         """
         super().__init__()
         assert global_pool in ('', 'avg', 'token')
@@ -395,7 +397,8 @@ class VisionTransformer(nn.Module):
         if prompt_length is not None and pool_size is not None and prompt_pool: 
             self.prompt = Prompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key, prompt_init=prompt_init,
                     prompt_pool=prompt_pool, prompt_key=prompt_key, pool_size=pool_size, top_k=top_k, batchwise_prompt=batchwise_prompt,
-                    prompt_key_init=prompt_key_init,)
+                    prompt_key_init=prompt_key_init, gating=prompt_gating, gate_tau=gate_tau, gate_qubits=gate_qubits,
+                    gate_layers=gate_layers, gate_train_sim=gate_train_sim,)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[

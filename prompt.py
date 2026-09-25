@@ -1,9 +1,109 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
+class SoftmaxGate(nn.Module):
+    """Parameter-free gate: w_i = softmax(s_i / tau) over the selected top-k prompts."""
+    def __init__(self, tau=0.1):
+        super().__init__()
+        self.tau = tau
+
+    def forward(self, sim, idx, query):
+        return F.softmax(sim / self.tau, dim=1)
+
+
+class LinearGate(nn.Module):
+    """Classical control with the same parameter budget as QuantumGate:
+    w_i = softmax(s_i / tau + <u_{j_i}, q(x)> + b_{j_i}), where j_i is the pool index of the i-th selected prompt.
+    Zero init, so it starts exactly as SoftmaxGate.
+    """
+    def __init__(self, pool_size, embed_dim, tau=0.1):
+        super().__init__()
+        self.tau = tau
+        self.weight = nn.Parameter(torch.zeros(pool_size, embed_dim))
+        self.bias = nn.Parameter(torch.zeros(pool_size))
+
+    def forward(self, sim, idx, query):
+        logit = (query @ self.weight.t() + self.bias).gather(1, idx) # B, top_k
+        return F.softmax(sim / self.tau + logit, dim=1)
+
+
+class QuantumGate(nn.Module):
+    """Quantum interference prompt gating, simulated exactly as a 2^n_qubits state vector.
+
+    a_i(x) = sqrt(softmax(s_i / tau)) * exp(i * phi_{j_i}(x)),  i = 1..top_k (remaining amplitudes are 0)
+    w_i(x) = |[U_theta a(x)]_i|^2 / sum_{j <= top_k} |[U_theta a(x)]_j|^2
+
+    phi_j(x) = <u_j, q(x)> + b_j is a per-prompt phase read from the query feature.
+    Each circuit layer is E^† R_b E R_a, where R_* are per-qubit ZYZ rotations and E is the CNOT ladder
+    CNOT(0->1) ... CNOT(n-2->n-1). The ladder is mirrored so that U_theta = I at theta = 0: together with
+    zero-initialised phases the gate starts exactly as SoftmaxGate, and entanglement grows as theta is learned.
+    """
+    def __init__(self, top_k, pool_size, embed_dim, tau=0.1, n_qubits=3, n_layers=2):
+        super().__init__()
+        assert 2 ** n_qubits >= top_k, f'{n_qubits} qubits cannot hold {top_k} prompts'
+        self.tau = tau
+        self.top_k = top_k
+        self.n_qubits = n_qubits
+        self.dim = 2 ** n_qubits
+
+        self.phase_weight = nn.Parameter(torch.zeros(pool_size, embed_dim))
+        self.phase_bias = nn.Parameter(torch.zeros(pool_size))
+        # theta[layer, block (a: before the ladder, b: inside it), qubit, ZYZ euler angles]
+        self.theta = nn.Parameter(torch.zeros(n_layers, 2, n_qubits, 3))
+        self.register_buffer('ladder', self._cnot_ladder(n_qubits), persistent=False)
+
+    @staticmethod
+    def _cnot_ladder(n_qubits):
+        # basis index i = sum_q b_q * 2^(n-1-q), i.e. qubit 0 is the most significant bit
+        dim = 2 ** n_qubits
+        ladder = torch.eye(dim)
+        for control in range(n_qubits - 1):
+            c_bit, t_bit = 1 << (n_qubits - 1 - control), 1 << (n_qubits - 2 - control)
+            perm = torch.zeros(dim, dim)
+            for i in range(dim):
+                perm[i ^ t_bit if i & c_bit else i, i] = 1.
+            ladder = perm @ ladder
+        return ladder
+
+    @staticmethod
+    def _rotations(angles):
+        """Kronecker product over qubits of RZ(gamma) RY(beta) RZ(alpha); angles: (n_qubits, 3)."""
+        alpha, beta, gamma = angles.unbind(-1)
+        c, s = torch.cos(beta / 2), torch.sin(beta / 2)
+        e_sum, e_diff = torch.exp(-0.5j * (alpha + gamma)), torch.exp(0.5j * (alpha - gamma))
+        rot = torch.stack([
+            torch.stack([e_sum * c, -e_diff * s], dim=-1),
+            torch.stack([e_diff.conj() * s, e_sum.conj() * c], dim=-1),
+        ], dim=-2) # n_qubits, 2, 2
+        full = rot[0]
+        for r in rot[1:]:
+            full = torch.einsum('ab,cd->acbd', full, r).reshape(full.shape[0] * 2, full.shape[1] * 2)
+        return full
+
+    def unitary(self):
+        ladder = self.ladder.to(torch.complex64)
+        u = torch.eye(self.dim, dtype=torch.complex64, device=self.theta.device)
+        for layer in self.theta.float():
+            u = ladder.t() @ self._rotations(layer[1]) @ ladder @ self._rotations(layer[0]) @ u
+        return u
+
+    def forward(self, sim, idx, query):
+        with torch.autocast(device_type=sim.device.type, enabled=False):
+            sim, query = sim.float(), query.float()
+            magnitude = torch.sqrt(F.softmax(sim / self.tau, dim=1)) # B, top_k
+            phase = (query @ self.phase_weight.t() + self.phase_bias).gather(1, idx) # B, top_k
+            amp = F.pad(torch.polar(magnitude, phase), (0, self.dim - self.top_k)) # B, 2^n
+            state = (amp @ self.unitary().t())[:, :self.top_k]
+            prob = state.real ** 2 + state.imag ** 2 # |.|^2 without abs(), whose gradient is undefined at 0
+            return prob / prob.sum(dim=1, keepdim=True).clamp_min(1e-12)
+
 
 class Prompt(nn.Module):
     def __init__(self, length=5, embed_dim=768, embedding_key='mean', prompt_init='uniform', prompt_pool=False, 
-                 prompt_key=False, pool_size=None, top_k=None, batchwise_prompt=False, prompt_key_init='uniform',):
+                 prompt_key=False, pool_size=None, top_k=None, batchwise_prompt=False, prompt_key_init='uniform',
+                 gating='none', gate_tau=0.1, gate_qubits=3, gate_layers=2, gate_train_sim=False,):
         super().__init__()
 
         self.length = length
@@ -38,6 +138,23 @@ class Prompt(nn.Module):
             prompt_mean = torch.mean(self.prompt, dim=1)
             self.prompt_key = prompt_mean
     
+        # optional reweighting of the selected top-k prompts: P_i -> top_k * w_i * P_i
+        self.gating = gating
+        self.gate_tau = gate_tau
+        self.gate_train_sim = gate_train_sim
+        if gating == 'none':
+            self.gate = None
+        else:
+            assert prompt_pool, 'prompt gating needs a prompt pool'
+            if gating == 'softmax':
+                self.gate = SoftmaxGate(tau=gate_tau)
+            elif gating == 'linear':
+                self.gate = LinearGate(pool_size, embed_dim, tau=gate_tau)
+            elif gating == 'quantum':
+                self.gate = QuantumGate(top_k, pool_size, embed_dim, tau=gate_tau, n_qubits=gate_qubits, n_layers=gate_layers)
+            else:
+                raise NotImplementedError(f'Not supported prompt gating: {gating}')
+
     def l2_normalize(self, x, dim=None, epsilon=1e-12):
         """Normalizes a given vector or matrix."""
         square_sum = torch.sum(x ** 2, dim=dim, keepdim=True)
@@ -85,6 +202,17 @@ class Prompt(nn.Module):
 
             batched_prompt_raw = self.prompt[idx] # B, top_k, length, C
             batch_size, top_k, length, c = batched_prompt_raw.shape
+
+            if self.gate is not None:
+                selected_sim = similarity.gather(1, idx) # B, top_k
+                if not self.gate_train_sim:
+                    # keep L2P's decoupling: keys are only trained by the pull constraint, not by the CE loss
+                    selected_sim = selected_sim.detach()
+                gate_weights = self.gate(selected_sim, idx, x_embed_norm) # B, top_k, rows sum to 1
+                batched_prompt_raw = batched_prompt_raw * (top_k * gate_weights).to(batched_prompt_raw.dtype)[:, :, None, None]
+                out['gate_weights'] = gate_weights
+                out['gate_prior'] = F.softmax(selected_sim.detach() / self.gate_tau, dim=1)
+
             batched_prompt = batched_prompt_raw.reshape(batch_size, top_k * length, c) # B, top_k * length, C
 
             out['prompt_idx'] = idx

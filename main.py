@@ -73,6 +73,11 @@ def main(args):
         prompt_key_init=args.prompt_key_init,
         head_type=args.head_type,
         use_prompt_mask=args.use_prompt_mask,
+        prompt_gating=args.prompt_gating,
+        gate_tau=args.gate_tau,
+        gate_qubits=args.gate_qubits,
+        gate_layers=args.gate_layers,
+        gate_train_sim=args.gate_train_sim,
     )
     original_model.to(device)
     model.to(device)  

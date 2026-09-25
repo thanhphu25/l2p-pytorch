@@ -12,6 +12,7 @@ Train and eval functions used in main.py
 import math
 import sys
 import os
+import time
 import datetime
 import json
 from typing import Iterable
@@ -26,13 +27,27 @@ from timm.optim import create_optimizer
 
 import utils
 
+def make_grad_scaler(device, enabled):
+    if hasattr(torch.amp, 'GradScaler'):
+        return torch.amp.GradScaler(device.type, enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
+
+def gate_stats(output):
+    """Mean entropy of the prompt gate weights and their L1 distance to softmax(cosine / tau)."""
+    w = output['gate_weights'].float()
+    entropy = -(w * w.clamp_min(1e-12).log()).sum(dim=1).mean()
+    deviation = (w - output['gate_prior'].float()).abs().sum(dim=1).mean()
+    return entropy.item(), deviation.item()
+
 def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, max_norm: float = 0,
-                    set_training_mode=True, task_id=-1, class_mask=None, args = None,):
+                    set_training_mode=True, task_id=-1, class_mask=None, args = None, scaler=None,):
 
     model.train(set_training_mode)
     original_model.eval()
+    if scaler is None:
+        scaler = make_grad_scaler(device, enabled=args.amp)
 
     if args.distributed and utils.get_world_size() > 1:
         data_loader.sampler.set_epoch(epoch)
@@ -46,26 +61,27 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
         input = input.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
-        with torch.no_grad():
-            if original_model is not None:
-                output = original_model(input)
-                cls_features = output['pre_logits']
-            else:
-                cls_features = None
-        
-        output = model(input, task_id=task_id, cls_features=cls_features, train=set_training_mode)
-        logits = output['logits']
+        with torch.autocast(device_type=device.type, enabled=args.amp):
+            with torch.no_grad():
+                if original_model is not None:
+                    output = original_model(input)
+                    cls_features = output['pre_logits']
+                else:
+                    cls_features = None
+            
+            output = model(input, task_id=task_id, cls_features=cls_features, train=set_training_mode)
+            logits = output['logits']
 
-        # here is the trick to mask out classes of non-current tasks
-        if args.train_mask and class_mask is not None:
-            mask = class_mask[task_id]
-            not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
-            not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
-            logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
+            # here is the trick to mask out classes of non-current tasks
+            if args.train_mask and class_mask is not None:
+                mask = class_mask[task_id]
+                not_mask = np.setdiff1d(np.arange(args.nb_classes), mask)
+                not_mask = torch.tensor(not_mask, dtype=torch.int64).to(device)
+                logits = logits.index_fill(dim=1, index=not_mask, value=float('-inf'))
 
-        loss = criterion(logits, target) # base criterion (CrossEntropyLoss)
-        if args.pull_constraint and 'reduce_sim' in output:
-            loss = loss - args.pull_constraint_coeff * output['reduce_sim']
+            loss = criterion(logits, target) # base criterion (CrossEntropyLoss)
+            if args.pull_constraint and 'reduce_sim' in output:
+                loss = loss - args.pull_constraint_coeff * output['reduce_sim']
 
         acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
@@ -74,15 +90,22 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
             sys.exit(1)
 
         optimizer.zero_grad()
-        loss.backward() 
+        scaler.scale(loss).backward() 
+        scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
-        torch.cuda.synchronize()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         metric_logger.update(Loss=loss.item())
         metric_logger.update(Lr=optimizer.param_groups[0]["lr"])
         metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
         metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
+        if 'gate_weights' in output:
+            gate_ent, gate_dev = gate_stats(output)
+            metric_logger.meters['GateEnt'].update(gate_ent, n=input.shape[0])
+            metric_logger.meters['GateDev'].update(gate_dev, n=input.shape[0])
         
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -108,15 +131,15 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             target = target.to(device, non_blocking=True)
 
             # compute output
-
-            if original_model is not None:
-                output = original_model(input)
-                cls_features = output['pre_logits']
-            else:
-                cls_features = None
-            
-            output = model(input, task_id=task_id, cls_features=cls_features)
-            logits = output['logits']
+            with torch.autocast(device_type=device.type, enabled=args.amp):
+                if original_model is not None:
+                    output = original_model(input)
+                    cls_features = output['pre_logits']
+                else:
+                    cls_features = None
+                
+                output = model(input, task_id=task_id, cls_features=cls_features)
+            logits = output['logits'].float()
 
             if args.task_inc and class_mask is not None:
                 #adding mask to output logits
@@ -133,6 +156,10 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             metric_logger.meters['Loss'].update(loss.item())
             metric_logger.meters['Acc@1'].update(acc1.item(), n=input.shape[0])
             metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
+            if 'gate_weights' in output:
+                gate_ent, gate_dev = gate_stats(output)
+                metric_logger.meters['GateEnt'].update(gate_ent, n=input.shape[0])
+                metric_logger.meters['GateDev'].update(gate_dev, n=input.shape[0])
 
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
@@ -172,12 +199,32 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
 
     return test_stats
 
+def summarize_acc_matrix(acc_matrix, task_id):
+    """Metrics after training task `task_id`; acc_matrix[i, t] is the accuracy on task i after training task t."""
+    stage_acc = [float(np.mean(acc_matrix[:t + 1, t])) for t in range(task_id + 1)]
+    forgetting = 0.0
+    if task_id > 0:
+        forgetting = float(np.mean((np.max(acc_matrix, axis=1) - acc_matrix[:, task_id])[:task_id]))
+    return {
+        'final_avg_acc': stage_acc[-1],                     # L2P "Average Acc": mean accuracy over seen tasks after the last task
+        'avg_incremental_acc': float(np.mean(stage_acc)),   # mean of the above over all incremental stages
+        'forgetting': forgetting,
+        'stage_acc': stage_acc,
+    }
+
 def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer, lr_scheduler, device: torch.device, 
                     class_mask=None, args = None,):
 
     # create matrix to save end-of-task accuracies 
     acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
+
+    scaler = make_grad_scaler(device, enabled=args.amp)
+    epoch_times = []
+    history = []
+    train_start = time.time()
+    n_trainable = sum(p.numel() for p in model_without_ddp.parameters() if p.requires_grad)
+    n_gate = sum(p.numel() for n, p in model_without_ddp.named_parameters() if n.startswith('prompt.gate.') and p.requires_grad)
 
     for task_id in range(args.num_tasks):
        # Transfer previous learned prompt params to the new prompt
@@ -229,17 +276,21 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             optimizer = create_optimizer(args, model)
         
         for epoch in range(args.epochs):            
+            epoch_start = time.time()
             train_stats = train_one_epoch(model=model, original_model=original_model, criterion=criterion, 
                                         data_loader=data_loader[task_id]['train'], optimizer=optimizer, 
                                         device=device, epoch=epoch, max_norm=args.clip_grad, 
-                                        set_training_mode=True, task_id=task_id, class_mask=class_mask, args=args,)
+                                        set_training_mode=True, task_id=task_id, class_mask=class_mask, args=args,
+                                        scaler=scaler,)
+            epoch_times.append(time.time() - epoch_start)
             
             if lr_scheduler:
                 lr_scheduler.step(epoch)
 
         test_stats = evaluate_till_now(model=model, original_model=original_model, data_loader=data_loader, device=device, 
                                     task_id=task_id, class_mask=class_mask, acc_matrix=acc_matrix, args=args)
-        if args.output_dir and utils.is_main_process():
+        save_ckpt = args.save_ckpt == 'all' or (args.save_ckpt == 'last' and task_id == args.num_tasks - 1)
+        if args.output_dir and utils.is_main_process() and save_ckpt:
             Path(os.path.join(args.output_dir, 'checkpoint')).mkdir(parents=True, exist_ok=True)
             
             checkpoint_path = os.path.join(args.output_dir, 'checkpoint/task{}_checkpoint.pth'.format(task_id+1))
@@ -261,3 +312,31 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         if args.output_dir and utils.is_main_process():
             with open(os.path.join(args.output_dir, '{}_stats.txt'.format(datetime.datetime.now().strftime('log_%Y_%m_%d_%H_%M'))), 'a') as f:
                 f.write(json.dumps(log_stats) + '\n')
+
+        # machine-readable summary, rewritten after every task so partial runs are still usable
+        history.append({'task': task_id + 1, **log_stats})
+        if args.output_dir and utils.is_main_process():
+            summary = {
+                'dataset': args.dataset,
+                'prompt_gating': args.prompt_gating,
+                'gate_tau': args.gate_tau,
+                'gate_qubits': args.gate_qubits,
+                'gate_layers': args.gate_layers,
+                'gate_train_sim': args.gate_train_sim,
+                'seed': args.seed,
+                'amp': args.amp,
+                'epochs': args.epochs,
+                'batch_size': args.batch_size,
+                'num_tasks': args.num_tasks,
+                'completed_tasks': task_id + 1,
+                **summarize_acc_matrix(acc_matrix, task_id),
+                'acc_matrix': acc_matrix.tolist(),
+                'epoch_time_mean': float(np.mean(epoch_times)),
+                'epoch_times': epoch_times,
+                'train_time_total': time.time() - train_start,
+                'n_trainable_params': n_trainable,
+                'n_gate_params': n_gate,
+                'history': history,
+            }
+            with open(os.path.join(args.output_dir, 'summary.json'), 'w') as f:
+                json.dump(summary, f, indent=2)

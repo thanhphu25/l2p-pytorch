@@ -97,6 +97,20 @@ python run_with_submitit.py <cifar100_l2p or five_datasets_l2p> --shared_folder 
 Absolute Path of shared folder must be accessible from all nodes.<br>
 According to your environment, you can use `NCLL_SOCKET_IFNAME=<Your own IP interface to use for communication>` optionally.
 
+## Prompt gating (experimental)
+After L2P selects the top-k prompts by cosine similarity, `--prompt_gating` can rescale them as `P_i -> k * w_i * P_i` (the weights sum to 1, so the average prompt scale matches L2P):
+
+| `--prompt_gating` | weights `w` |
+| --- | --- |
+| `none` (default) | original L2P, no rescaling |
+| `softmax` | `softmax(s / tau)` of the selected cosine scores `s` |
+| `linear` | `softmax(s / tau + u_j·q(x) + b_j)`, a classical gate with the quantum gate's parameter budget |
+| `quantum` | amplitudes `sqrt(softmax(s / tau)) * exp(i * phi_j(x))` pass through a simulated 3-qubit circuit (ZYZ rotations + CNOT ladder), and `w` is the measured probability over the k occupied basis states |
+
+Related flags: `--gate_tau` (0.1), `--gate_qubits` (3), `--gate_layers` (2), and `--gate_train_sim`, which lets the CE loss reach the prompt keys through the gate (off by default, so keys are still trained only by the pull constraint, as in L2P). The `linear` and `quantum` gates are initialised to coincide with `softmax`. Also available: `--amp` for mixed precision and `--save_ckpt {all,last,none}`. Each run writes `summary.json` (accuracy matrix, final/average-incremental accuracy, forgetting, per-epoch time, parameter counts) to `--output_dir`.
+
+On Kaggle, run [kaggle/l2p_quantum_gating.ipynb](kaggle/l2p_quantum_gating.ipynb). It runs all variants (one per GPU) through `kaggle/run_experiments.py` and builds the comparison table with `kaggle/summarize.py`. Sanity checks: `python tests/test_prompt_gating.py`.
+
 ## Evaluation
 To evaluate a trained model:
 ```

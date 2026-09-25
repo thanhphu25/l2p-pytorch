@@ -91,6 +91,14 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--pull_constraint', default=True)
     subparsers.add_argument('--pull_constraint_coeff', default=0.1, type=float)
 
+    # Prompt gating parameters (reweight the selected top-k prompts before prepending them to the ViT)
+    subparsers.add_argument('--prompt_gating', default='none', choices=['none', 'softmax', 'linear', 'quantum'], type=str,
+                        help='none: original L2P; softmax: softmax(cosine/tau); linear: param-matched classical gate; quantum: 3-qubit interference gate')
+    subparsers.add_argument('--gate_tau', default=0.1, type=float, help='temperature of softmax(cosine/tau)')
+    subparsers.add_argument('--gate_qubits', default=3, type=int, help='qubits of the quantum gate (2^n >= top_k)')
+    subparsers.add_argument('--gate_layers', default=2, type=int, help='layers of the quantum circuit')
+    subparsers.add_argument('--gate_train_sim', action='store_true', help='let the CE loss reach the prompt keys through the gate')
+
     # ViT parameters
     subparsers.add_argument('--global_pool', default='token', choices=['token', 'avg'], type=str, help='type of global pooling for final sequence')
     subparsers.add_argument('--head_type', default='prompt', choices=['token', 'gap', 'prompt', 'token+prompt'], type=str, help='input type of classification head')
@@ -98,3 +106,5 @@ def get_args_parser(subparsers):
 
     # Misc parameters
     subparsers.add_argument('--print_freq', type=int, default=10, help = 'The frequency of printing')
+    subparsers.add_argument('--amp', action='store_true', help='mixed precision training and evaluation')
+    subparsers.add_argument('--save_ckpt', default='all', choices=['all', 'last', 'none'], type=str, help='which task checkpoints to save')
