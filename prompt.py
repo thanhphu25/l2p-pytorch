@@ -1,9 +1,14 @@
 import torch
 import torch.nn as nn
 
+from patch_transform import PromptConditionedPatchTransform
+
 class Prompt(nn.Module):
-    def __init__(self, length=5, embed_dim=768, embedding_key='mean', prompt_init='uniform', prompt_pool=False, 
-                 prompt_key=False, pool_size=None, top_k=None, batchwise_prompt=False, prompt_key_init='uniform',):
+    def __init__(self, length=5, embed_dim=768, embedding_key='mean', prompt_init='uniform', prompt_pool=False,
+                 prompt_key=False, pool_size=None, top_k=None, batchwise_prompt=False, prompt_key_init='uniform',
+                 patch_transform='none', phase_latent_dim=32, phase_circuit_depth=2,
+                 phase_alpha_init=0.05, phase_alpha_max=0.2,
+                 phase_circuit_init_std=0.1):
         super().__init__()
 
         self.length = length
@@ -15,6 +20,10 @@ class Prompt(nn.Module):
         self.pool_size = pool_size
         self.top_k = top_k
         self.batchwise_prompt = batchwise_prompt
+        self.patch_transform_mode = patch_transform
+
+        if patch_transform not in ('none',) + PromptConditionedPatchTransform.MODES:
+            raise ValueError('Unsupported patch transform: {}'.format(patch_transform))
 
         if self.prompt_pool:
             prompt_pool_shape = (pool_size, length, embed_dim)
@@ -37,6 +46,19 @@ class Prompt(nn.Module):
             # only compatible with prompt, not prefix
             prompt_mean = torch.mean(self.prompt, dim=1)
             self.prompt_key = prompt_mean
+
+        if patch_transform != 'none':
+            if not prompt_pool:
+                raise ValueError('Patch transformation requires a prompt pool')
+            self.patch_transformer = PromptConditionedPatchTransform(
+                embed_dim=embed_dim,
+                mode=patch_transform,
+                latent_dim=phase_latent_dim,
+                circuit_depth=phase_circuit_depth,
+                alpha_init=phase_alpha_init,
+                alpha_max=phase_alpha_max,
+                circuit_init_std=phase_circuit_init_std,
+            )
     
     def l2_normalize(self, x, dim=None, epsilon=1e-12):
         """Normalizes a given vector or matrix."""
@@ -84,6 +106,15 @@ class Prompt(nn.Module):
                 idx = prompt_mask # B, top_k
 
             batched_prompt_raw = self.prompt[idx] # B, top_k, length, C
+
+            # This is the only change to the original L2P forward path: after
+            # its ordinary top-k retrieval, selected prompts condition an
+            # optional patch transform. Mode "none" executes no extra module.
+            if hasattr(self, 'patch_transformer'):
+                x_embed, patch_diagnostics = self.patch_transformer(
+                    x_embed, batched_prompt_raw)
+                out.update(patch_diagnostics)
+
             batch_size, top_k, length, c = batched_prompt_raw.shape
             batched_prompt = batched_prompt_raw.reshape(batch_size, top_k * length, c) # B, top_k * length, C
 

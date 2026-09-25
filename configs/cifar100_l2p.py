@@ -86,10 +86,21 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--shared_prompt_pool', default=False, type=bool)
     subparsers.add_argument('--shared_prompt_key', default=False, type=bool)
     subparsers.add_argument('--batchwise_prompt', default=True, type=bool)
+    subparsers.add_argument('--no_batchwise_prompt', action='store_false', dest='batchwise_prompt')
     subparsers.add_argument('--embedding_key', default='cls', type=str)
     subparsers.add_argument('--predefined_key', default='', type=str)
     subparsers.add_argument('--pull_constraint', default=True)
     subparsers.add_argument('--pull_constraint_coeff', default=0.1, type=float)
+
+    # Isolated patch-transform ablations on top of original cosine L2P.
+    subparsers.add_argument(
+        '--patch_transform', default='none',
+        choices=['none', 'phase', 'mlp', 'phase_no_encoding'])
+    subparsers.add_argument('--phase_latent_dim', default=32, type=int)
+    subparsers.add_argument('--phase_circuit_depth', default=2, type=int)
+    subparsers.add_argument('--phase_alpha_init', default=0.05, type=float)
+    subparsers.add_argument('--phase_alpha_max', default=0.2, type=float)
+    subparsers.add_argument('--phase_circuit_init_std', default=0.1, type=float)
 
     # ViT parameters
     subparsers.add_argument('--global_pool', default='token', choices=['token', 'avg'], type=str, help='type of global pooling for final sequence')

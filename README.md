@@ -80,6 +80,29 @@ python -m torch.distributed.launch \
 
 Also available in <a href="https://slurm.schedmd.com/documentation.html">Slurm</a> system by changing options on `train_cifar100_l2p.sh` or `train_five_datasets.sh` properly.
 
+### Isolated patch-transform ablations
+
+This branch keeps the original cosine L2P path as `--patch_transform none`
+(the default) and adds exactly one optional transform after L2P top-k prompt
+retrieval and before the prompted ViT backbone:
+
+```
+--patch_transform phase                 # prompt-conditioned phase interference
+--patch_transform mlp                   # parameter-matched classical control
+--patch_transform phase_no_encoding     # same circuit, all input phases are 0
+```
+
+The phase version pools ViT patches to 4x4, maps patch/prompt pairs to 16
+relative phases, simulates a trainable 4-qubit RY/RZ+CNOT circuit, upsamples
+the 16 measurement probabilities, and applies a small multiplicative residual
+to the original patch embeddings. With ViT-B/16 and latent dimension 32,
+`phase` has 49,169 transform parameters and `mlp` has 49,218 (<0.1%
+difference). No QSD router or other continual-learning method is included.
+
+Every run updates `<output_dir>/results_summary.json` after each task. It
+contains final and average-incremental accuracy, forgetting, backward transfer,
+old/new-task accuracy, the accuracy matrix, runtime, and patch diagnostics.
+
 ### Multinode train
 
 Distributed training is available via Slurm and [submitit](https://github.com/facebookincubator/submitit):

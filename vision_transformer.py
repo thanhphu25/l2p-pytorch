@@ -335,7 +335,10 @@ class VisionTransformer(nn.Module):
             class_token=True, no_embed_class=False, fc_norm=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
             weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block,
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
-            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,):
+            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
+            patch_transform='none', phase_latent_dim=32, phase_circuit_depth=2,
+            phase_alpha_init=0.05, phase_alpha_max=0.2,
+            phase_circuit_init_std=0.1,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -395,7 +398,10 @@ class VisionTransformer(nn.Module):
         if prompt_length is not None and pool_size is not None and prompt_pool: 
             self.prompt = Prompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key, prompt_init=prompt_init,
                     prompt_pool=prompt_pool, prompt_key=prompt_key, pool_size=pool_size, top_k=top_k, batchwise_prompt=batchwise_prompt,
-                    prompt_key_init=prompt_key_init,)
+                    prompt_key_init=prompt_key_init, patch_transform=patch_transform,
+                    phase_latent_dim=phase_latent_dim, phase_circuit_depth=phase_circuit_depth,
+                    phase_alpha_init=phase_alpha_init, phase_alpha_max=phase_alpha_max,
+                    phase_circuit_init_std=phase_circuit_init_std,)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
