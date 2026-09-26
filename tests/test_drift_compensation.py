@@ -72,6 +72,15 @@ class HeisenbergHeadsTest(unittest.TestCase):
         # Unseen classes keep the live classifier logits.
         torch.testing.assert_close(logits['unitary'][:, 3:], head(drifted)[:, 3:])
 
+    @unittest.skipUnless(torch.cuda.is_available(), 'needs CUDA')
+    def test_compensate_accepts_cpu_features_for_cuda_buffers(self):
+        # engine.collect_head_features returns CPU tensors (Kaggle regression).
+        heads = HeisenbergHeads(num_classes=6, dim=4).cuda()
+        heads.add_classes([0, 1], torch.nn.Linear(4, 6).cuda())
+        features = torch.randn(50, 4)
+        stats = heads.compensate(features, features @ orthogonal(4).float())
+        self.assertLess(stats['residual_unitary'], 1e-4)
+
     def test_new_classes_enter_with_trained_rows_and_compose_over_tasks(self):
         heads, head = self.make()
         heads.add_classes([0, 1], head)

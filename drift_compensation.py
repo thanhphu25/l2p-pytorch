@@ -74,7 +74,9 @@ class HeisenbergHeads(nn.Module):
     @torch.no_grad()
     def compensate(self, before, after):
         """Evolve every stored (old-class) row with the fitted drift map."""
-        maps = fit_drift(before.to(self.weight.device), after.to(self.weight.device), self.ridge)
+        # Features are collected on CPU; fit and diagnose on the buffers' device.
+        before, after = before.to(self.weight.device), after.to(self.weight.device)
+        maps = fit_drift(before, after, self.ridge)
         old = self.seen.nonzero(as_tuple=True)[0]
         if len(old):
             for index, mode in enumerate(MODES):
