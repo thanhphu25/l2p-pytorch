@@ -3,3 +3,7 @@
 checkpoint/
 *.out
 *.err
+**/paper/**
+**/docs/**
+**/tmp/**
+.worktrees/

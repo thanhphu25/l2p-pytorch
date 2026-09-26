@@ -41,6 +41,7 @@ from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_n
 from timm.models.registry import register_model
 
 from prompt import Prompt
+from prompt_circuit import PromptCircuit
 
 _logger = logging.getLogger(__name__)
 
@@ -205,10 +206,16 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
+    def forward(self, x, prefix=None):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)   # make torchscript happy (cannot use tensor as tuple)
+
+        if prefix is not None:
+            # prefix: [B, 2, T, C] key/value prompts, used directly (prefix-tuning).
+            prefix = prefix.reshape(B, 2, -1, self.num_heads, C // self.num_heads).permute(1, 0, 3, 2, 4)
+            k = torch.cat((prefix[0], k), dim=2)
+            v = torch.cat((prefix[1], v), dim=2)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
@@ -247,8 +254,8 @@ class Block(nn.Module):
         self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
         self.drop_path2 = DropPath(drop_path) if drop_path > 0. else nn.Identity()
 
-    def forward(self, x):
-        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x))))
+    def forward(self, x, prefix=None):
+        x = x + self.drop_path1(self.ls1(self.attn(self.norm1(x), prefix=prefix)))
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
 
@@ -337,7 +344,8 @@ class VisionTransformer(nn.Module):
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
             top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
             prompt_router='cosine', qsd_state_dim=16, qsd_rank=4, qsd_eps=1e-4, qsd_cls_mix=0.5,
-            qsd_cosine_tau=0.1, qsd_memory_size=10, qsd_no_cosine_prior=False,):
+            qsd_cosine_tau=0.1, qsd_memory_size=10, qsd_no_cosine_prior=False,
+            circuit_mode='none', circuit_layers=(1, 2, 3, 4, 5), circuit_rank=8,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -401,6 +409,15 @@ class VisionTransformer(nn.Module):
                     qsd_rank=qsd_rank, qsd_eps=qsd_eps, qsd_cls_mix=qsd_cls_mix,
                     qsd_cosine_tau=qsd_cosine_tau, qsd_memory_size=qsd_memory_size,
                     qsd_no_cosine_prior=qsd_no_cosine_prior,)
+
+        if circuit_mode != 'none':
+            if not hasattr(self, 'prompt') or not prompt_pool:
+                raise ValueError('The prompt circuit starts from the L2P prompt pool')
+            if max(circuit_layers) >= depth or min(circuit_layers) < 0:
+                raise ValueError('circuit_layers must index transformer blocks')
+            self.prompt_circuit = PromptCircuit(
+                embed_dim, circuit_layers, mode=circuit_mode, rank=circuit_rank,
+                pool_size=pool_size, length=prompt_length)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.Sequential(*[
@@ -486,7 +503,13 @@ class VisionTransformer(nn.Module):
         
         x = self.pos_drop(x + self.pos_embed)
 
-        if self.grad_checkpointing and not torch.jit.is_scripting():
+        if hasattr(self, 'prompt_circuit'):
+            prefixes, diagnostics = self.prompt_circuit(
+                res['batched_prompt'], res.get('prompt_idx'), pool=self.prompt.prompt)
+            res.update(diagnostics)
+            for index, block in enumerate(self.blocks):
+                x = block(x, prefix=prefixes.get(index))
+        elif self.grad_checkpointing and not torch.jit.is_scripting():
             x = checkpoint_seq(self.blocks, x)
         else:
             x = self.blocks(x)

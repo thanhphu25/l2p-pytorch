@@ -26,6 +26,7 @@ from timm.optim import create_optimizer
 
 import utils
 from result_summary import (
+    ROUTER_METRICS,
     build_results_summary,
     extract_router_metrics,
     save_results_summary,
@@ -47,6 +48,8 @@ def _update_router_metrics(metric_logger, output, batch_size):
         'qsd_strength': 'QSDStr',
         'route_entropy': 'RouteEnt',
         'qsd_retention_loss': 'QSDRet',
+        'circuit_norm_ratio': 'CircNorm',
+        'circuit_gram_drift': 'CircDrift',
     }
     for output_name, meter_name in names.items():
         if output_name in output:
@@ -186,7 +189,7 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
 def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, data_loader, 
                     device, task_id=-1, class_mask=None, acc_matrix=None, args=None,):
     stat_matrix = np.zeros((3, args.num_tasks)) # 3 for Acc@1, Acc@5, Loss
-    router_metrics = {name: [] for name in ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet')}
+    router_metrics = {name: [] for name in ROUTER_METRICS}
 
     for i in range(task_id+1):
         test_stats = evaluate(model=model, original_model=original_model, data_loader=data_loader[i]['val'], 

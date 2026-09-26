@@ -87,6 +87,9 @@ def main(args):
         qsd_cosine_tau=args.qsd_cosine_tau,
         qsd_memory_size=args.qsd_memory_size,
         qsd_no_cosine_prior=args.qsd_no_cosine_prior,
+        circuit_mode=args.circuit_mode,
+        circuit_layers=args.circuit_layers,
+        circuit_rank=args.circuit_rank,
     )
     original_model.to(device)
     model.to(device)  
@@ -167,6 +170,9 @@ def main(args):
     experiment_summary['total_training_seconds'] = float(total_time)
     experiment_summary['total_training_time'] = total_time_str
     experiment_summary['trainable_parameters'] = int(n_parameters)
+    if hasattr(model_without_ddp, 'prompt_circuit'):
+        experiment_summary['circuit_parameters'] = sum(
+            p.numel() for p in model_without_ddp.prompt_circuit.parameters())
     if utils.is_main_process():
         summary_path = save_results_summary(experiment_summary, args.output_dir)
         print_results_summary(experiment_summary, summary_path)

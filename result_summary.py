@@ -2,12 +2,19 @@ import json
 from pathlib import Path
 
 
-ROUTER_METRICS = ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet')
+ROUTER_METRICS = ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet',
+                  'CircNorm', 'CircDrift')
 
 
 def extract_router_metrics(stats):
     """Select compact QSD diagnostics from a MetricLogger result."""
     return {name: float(stats[name]) for name in ROUTER_METRICS if name in stats}
+
+
+def _method_name(args):
+    base = 'QSD-Prompt' if args.prompt_router == 'qsd' else 'L2P'
+    mode = getattr(args, 'circuit_mode', 'none')
+    return base if mode == 'none' else '{} + {} prompt circuit'.format(base, mode)
 
 
 def build_results_summary(args, task_summaries, acc_matrix, status='running'):
@@ -16,7 +23,7 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
     summary = {
         'schema_version': 1,
         'status': status,
-        'method': 'QSD-Prompt' if args.prompt_router == 'qsd' else 'L2P',
+        'method': _method_name(args),
         'dataset': args.dataset,
         'seed': int(args.seed),
         'prompt_router': args.prompt_router,
@@ -59,6 +66,14 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
             'no_cosine_prior': bool(args.qsd_no_cosine_prior),
         }
         summary['final_router_metrics'] = last.get('train_router_metrics', {})
+
+    if getattr(args, 'circuit_mode', 'none') != 'none':
+        summary['circuit_config'] = {
+            'mode': args.circuit_mode,
+            'layers': [int(layer) for layer in args.circuit_layers],
+            'rank': int(args.circuit_rank),
+        }
+        summary['final_router_metrics'] = last.get('eval_router_metrics', {})
 
     return summary
 

@@ -1,5 +1,34 @@
 # L2P PyTorch Implementation
 
+## Branch `unitary-prompt-circuit`: layer-wise unitary evolution of prompts
+
+L2P retrieval and its input prompt tokens are unchanged. With
+`--circuit_mode unitary`, the retrieved prompt `P0` is also evolved through a
+circuit of layer unitaries and prepended as prefix keys/values in blocks
+`--circuit_layers` (default 1-5):
+
+    P_l = P_{l-1} U_l,  U_l = exp(B_l C_l^T - C_l B_l^T)   (key and value streams)
+
+`U_l` is orthogonal, so the Gram matrix of the whole prompt pool (the
+distinguishability of prompts learned for different tasks) is the same at
+every layer, even while the shared circuit is updated for a new task. The
+exponential of the rank-2r generator is computed exactly as
+`I + W phi(MW) M` with a 4r x 4r matrix exponential.
+
+| `--circuit_mode` | Prefix at block l | Extra params (ViT-B, 5 layers, r=8) |
+| --- | --- | --- |
+| `none` | no prefix (plain L2P) | 0 |
+| `unitary` | `P0 U_1 ... U_l` | 122,880 |
+| `linear` | `P0 M_1 ... M_l`, `M = I + B C^T` (same params, not Gram-preserving) | 122,880 |
+| `shared` | `P0` at every layer | 0 |
+| `independent` | separate per-layer pool, same L2P indices (DualPrompt-like) | 384,000 |
+
+Every mode starts from "copy P0 to each layer" (identity maps). The claim that
+unitarity helps requires `unitary > linear` and `unitary >= independent`;
+gains over `none` alone can come from prefix-tuning itself. `CircNorm`
+(prefix/prompt norm ratio) and `CircDrift` (relative Gram change of the pool
+after the circuit) are logged; unitary gives 1 and ~0.
+
 This repository contains PyTorch implementation code for awesome continual learning method <a href="https://openaccess.thecvf.com/content/CVPR2022/papers/Wang_Learning_To_Prompt_for_Continual_Learning_CVPR_2022_paper.pdf">L2P</a>, <br>
 Wang, Zifeng, et al. "Learning to prompt for continual learning." CVPR. 2022.
 
