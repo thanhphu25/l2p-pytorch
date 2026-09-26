@@ -1,5 +1,38 @@
 # L2P PyTorch Implementation
 
+## Branch `qsd-density-head`: quantum state discrimination at the classifier
+
+L2P training is unchanged. With `--density_head`, every seen class is also
+stored as a trace-one rank-r density matrix built from its training features
+(read with the evaluation transform), and each test image is classified as a
+pure state `|x><x|`. One run evaluates all read-outs side by side against
+L2P's own linear head:
+
+| Head | Rule |
+| --- | --- |
+| `linear` | L2P classifier (baseline, same run) |
+| `<src>_ncm` | cosine to the class mean (classical prototype control) |
+| `<src>_fidelity` | Born rule without measurement design, `p_c ~ <x|sigma_c|x>` |
+| `<src>_pgm` | pretty-good measurement: `E_c = S^-1/2 (sigma_c + eps I)/M S^-1/2`, `sum_c E_c = I` |
+| `<src>_fusion` | `log_softmax(linear) + w * log p_pgm` |
+
+`<src>` is `frozen` (frozen ViT CLS; old class states never drift) or
+`prompted` (L2P's prompted features at the end of each class's task; these
+drift as the prompt pool keeps training). Class states are written once and
+never updated; the PGM is rebuilt from all stored states when classes arrive.
+Memory is per-class eigenvectors/eigenvalues/means (no images), about
+`100 x 768 x r x 4` bytes per source. It is simulated with real PyTorch.
+
+```bash
+python main.py cifar100_l2p ... --density_head \
+    --density_rank 32 --density_eps 1e-4 --density_fusion_weight 1.0
+```
+
+`results_summary.json` gains `density_heads` (final/incremental Acc,
+forgetting, BWT, accuracy matrix per head). Because the heads are stored in
+the checkpoints, `--eval` re-runs can sweep `--density_eps` and
+`--density_fusion_weight` without retraining (`--density_rank` must match).
+
 This repository contains PyTorch implementation code for awesome continual learning method <a href="https://openaccess.thecvf.com/content/CVPR2022/papers/Wang_Learning_To_Prompt_for_Continual_Learning_CVPR_2022_paper.pdf">L2P</a>, <br>
 Wang, Zifeng, et al. "Learning to prompt for continual learning." CVPR. 2022.
 

@@ -31,6 +31,7 @@ from result_summary import (
 )
 import models
 import utils
+from density_head import DensityHeads
 
 import warnings
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
@@ -88,6 +89,12 @@ def main(args):
         qsd_memory_size=args.qsd_memory_size,
         qsd_no_cosine_prior=args.qsd_no_cosine_prior,
     )
+    if args.density_head:
+        # Buffers only: no trainable parameters, so L2P training is unchanged.
+        model.density_heads = DensityHeads(
+            args.density_sources, args.nb_classes, model.embed_dim,
+            rank=args.density_rank, eps=args.density_eps,
+            fusion_weight=args.density_fusion_weight)
     original_model.to(device)
     model.to(device)  
 

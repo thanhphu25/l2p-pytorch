@@ -1,4 +1,5 @@
 import argparse
+from density_head import add_density_head_args
 
 def get_args_parser(subparsers):
     subparsers.add_argument('--batch-size', default=16, type=int, help='Batch size per device')
@@ -94,6 +95,7 @@ def get_args_parser(subparsers):
     # Quantum state discrimination (QSD) prompt retrieval. Cosine stays the
     # default so existing commands reproduce the unmodified L2P baseline.
     subparsers.add_argument('--prompt_router', default='cosine', choices=['cosine', 'qsd'])
+    add_density_head_args(subparsers)
     subparsers.add_argument('--qsd_state_dim', default=16, type=int)
     subparsers.add_argument('--qsd_rank', default=4, type=int)
     subparsers.add_argument('--qsd_eps', default=1e-4, type=float)
