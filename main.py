@@ -31,6 +31,7 @@ from result_summary import (
 )
 import models
 import utils
+from drift_compensation import HeisenbergHeads
 
 import warnings
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
@@ -88,6 +89,9 @@ def main(args):
         qsd_memory_size=args.qsd_memory_size,
         qsd_no_cosine_prior=args.qsd_no_cosine_prior,
     )
+    if args.drift_heads:
+        # Buffers only: no trainable parameters, so L2P training is unchanged.
+        model.drift_heads = HeisenbergHeads(args.nb_classes, model.embed_dim, ridge=args.drift_ridge)
     original_model.to(device)
     model.to(device)  
 

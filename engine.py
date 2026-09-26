@@ -9,6 +9,7 @@
 """
 Train and eval functions used in main.py
 """
+import copy
 import math
 import sys
 import os
@@ -18,6 +19,7 @@ from typing import Iterable
 from pathlib import Path
 
 import torch
+from torch.utils.data import DataLoader, Subset
 
 import numpy as np
 
@@ -26,10 +28,62 @@ from timm.optim import create_optimizer
 
 import utils
 from result_summary import (
+    ROUTER_METRICS,
     build_results_summary,
     extract_router_metrics,
     save_results_summary,
 )
+
+
+def _drift_heads(model):
+    return getattr(getattr(model, 'module', model), 'drift_heads', None)
+
+
+def _with_transform(dataset, transform):
+    """Same samples as `dataset`, read through `transform` (no augmentation)."""
+    if isinstance(dataset, Subset):
+        return Subset(_with_transform(dataset.dataset, transform), dataset.indices)
+    view = copy.copy(dataset)
+    view.transform = transform
+    return view
+
+
+def _dataset_transform(dataset):
+    while isinstance(dataset, Subset):
+        dataset = dataset.dataset
+    return dataset.transform
+
+
+@torch.no_grad()
+def collect_head_features(model, original_model, loaders, device, task_id, args):
+    """Classifier-input features of this task's TRAIN images, in a fixed order.
+
+    Read with the evaluation transform so the before/after passes are paired
+    image by image.
+    """
+    net = getattr(model, 'module', model)
+    dataset = _with_transform(loaders['train'].dataset, _dataset_transform(loaders['val'].dataset))
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
+                        num_workers=args.num_workers, pin_memory=args.pin_mem)
+    model.eval()
+    original_model.eval()
+    features = []
+    # Creating a DataLoader iterator draws a seed; restore RNG so training
+    # shuffles exactly as in a run without --drift_heads.
+    cpu_rng = torch.get_rng_state()
+    cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    try:
+        for input, _ in loader:
+            input = input.to(device, non_blocking=True)
+            original_output = original_model(input)
+            output = model(input, task_id=task_id, cls_features=original_output['pre_logits'],
+                           prompt_query_tokens=_prompt_query_from_original(original_output))
+            features.append(net.fc_norm(output['pre_logits']).cpu())
+    finally:
+        torch.set_rng_state(cpu_rng)
+        if cuda_rng is not None:
+            torch.cuda.set_rng_state_all(cuda_rng)
+    return torch.cat(features)
 
 
 def _prompt_query_from_original(output):
@@ -136,6 +190,11 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
     # switch to evaluation mode
     model.eval()
     original_model.eval()
+    heads = _drift_heads(model)
+    if heads is not None and not heads.seen.any():
+        heads = None
+    # Kept out of metric_logger so the per-batch log line stays readable.
+    head_correct, seen = {}, 0
 
     with torch.no_grad():
         for input, target in metric_logger.log_every(data_loader, args.print_freq, header):
@@ -174,19 +233,36 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
             metric_logger.meters['Acc@5'].update(acc5.item(), n=input.shape[0])
             _update_router_metrics(metric_logger, output, input.shape[0])
 
+            if heads is not None:
+                net = getattr(model, 'module', model)
+                head_logits = heads.head_logits(output['logits'], net.fc_norm(output['pre_logits']))
+                for name, value in head_logits.items():
+                    if args.task_inc and class_mask is not None:
+                        value = value + logits_mask
+                    correct = (value.argmax(-1) == target).sum().item()
+                    head_correct[name] = head_correct.get(name, 0) + correct
+                seen += len(target)
+
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
     print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
           .format(top1=metric_logger.meters['Acc@1'], top5=metric_logger.meters['Acc@5'], losses=metric_logger.meters['Loss']))
 
-    return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    for name, correct in head_correct.items():
+        stats['Acc@1/' + name] = 100.0 * correct / seen
+    if head_correct:
+        print('* Drift-compensated heads Acc@1: ' + '  '.join(
+            '{}={:.2f}'.format(name, 100.0 * correct / seen) for name, correct in head_correct.items()))
+    return stats
 
 
 @torch.no_grad()
 def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, data_loader, 
                     device, task_id=-1, class_mask=None, acc_matrix=None, args=None,):
     stat_matrix = np.zeros((3, args.num_tasks)) # 3 for Acc@1, Acc@5, Loss
-    router_metrics = {name: [] for name in ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet')}
+    router_metrics = {name: [] for name in ROUTER_METRICS}
+    head_per_task = {}
 
     for i in range(task_id+1):
         test_stats = evaluate(model=model, original_model=original_model, data_loader=data_loader[i]['val'], 
@@ -199,6 +275,9 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
         for name in router_metrics:
             if name in test_stats:
                 router_metrics[name].append(float(test_stats[name]))
+        for name, value in test_stats.items():
+            if name.startswith('Acc@1/'):
+                head_per_task.setdefault(name[len('Acc@1/'):], []).append(float(value))
 
         acc_matrix[i, task_id] = test_stats['Acc@1']
     
@@ -231,6 +310,11 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
             for name, values in router_metrics.items() if values
         },
     }
+    if head_per_task:
+        # Rows of each head's accuracy matrix; rebuilt in result_summary.
+        task_summary['head_per_task_acc1'] = head_per_task
+        print('[Drift-compensated heads avg Acc@1 till task{}] '.format(task_id + 1) + '  '.join(
+            '{}={:.2f}'.format(name, np.mean(values)) for name, values in head_per_task.items()))
     return test_stats, task_summary
 
 def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Module, original_model: torch.nn.Module, 
@@ -286,6 +370,12 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                         model.prompt.prompt_key[cur_idx] = model.prompt.prompt_key[prev_idx]
                         optimizer.param_groups[0]['params'] = model.parameters()
      
+        drift_before = None
+        if _drift_heads(model) is not None and task_id > 0:
+            # Features of this task's images under the model BEFORE it trains on them.
+            drift_before = collect_head_features(
+                model, original_model, data_loader[task_id], device, task_id, args)
+
         # Create new optimizer for each task to clear optimizer status
         if task_id > 0 and args.reinit_optimizer:
             optimizer = create_optimizer(args, model)
@@ -299,11 +389,23 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             if lr_scheduler:
                 lr_scheduler.step(epoch)
 
+        drift_stats = None
+        heads = _drift_heads(model)
+        if heads is not None:
+            if drift_before is not None:
+                drift_stats = heads.compensate(drift_before, collect_head_features(
+                    model, original_model, data_loader[task_id], device, task_id, args))
+                print('Feature drift on task {} train images: {}'.format(task_id + 1, ', '.join(
+                    '{}={:.4f}'.format(name, value) for name, value in drift_stats.items())))
+            heads.add_classes(class_mask[task_id], model_without_ddp.head)
+
         test_stats, task_summary = evaluate_till_now(
             model=model, original_model=original_model, data_loader=data_loader,
             device=device, task_id=task_id, class_mask=class_mask,
             acc_matrix=acc_matrix, args=args)
         task_summary['train_router_metrics'] = extract_router_metrics(train_stats)
+        if drift_stats is not None:
+            task_summary['drift_diagnostics'] = drift_stats
         task_summaries.append(task_summary)
 
         # Retain only the task's mean density state and measurement outcome.

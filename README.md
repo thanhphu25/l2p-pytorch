@@ -1,5 +1,27 @@
 # L2P PyTorch Implementation
 
+## Branch `heisenberg-drift-compensation`: evolve old classifiers, not only states
+
+L2P shares its prompt pool across tasks, so old-class features drift while
+their classifier rows stay frozen (the training class mask gives them no
+gradient). With `--drift_heads`, the drift of the current task's train
+features across its own training (before -> after, evaluation transform,
+paired per image) is fitted and applied to every old-class row, as in the
+Heisenberg picture where observables evolve so expectation values persist:
+
+| Head | Map fitted from after- to before-task features |
+| --- | --- |
+| `none` | no compensation (L2P, same run) |
+| `shift` | translation only (SDC-like control) |
+| `affine` | ridge least squares toward the identity (free linear control) |
+| `unitary` | orthogonal Procrustes rotation + translation (Heisenberg map) |
+
+Training is unchanged; compensated rows are buffers used only by the extra
+evaluation heads, and no images are stored. `results_summary.json` gains
+`drift_heads` (metrics per head) and `drift_diagnostics` (relative drift and
+the residual each map leaves, per task). Cost: two forward passes over each
+task's train split.
+
 This repository contains PyTorch implementation code for awesome continual learning method <a href="https://openaccess.thecvf.com/content/CVPR2022/papers/Wang_Learning_To_Prompt_for_Continual_Learning_CVPR_2022_paper.pdf">L2P</a>, <br>
 Wang, Zifeng, et al. "Learning to prompt for continual learning." CVPR. 2022.
 
