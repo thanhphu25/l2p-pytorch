@@ -2,7 +2,9 @@ import json
 from pathlib import Path
 
 
-ROUTER_METRICS = ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet')
+ROUTER_METRICS = ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet',
+                  'CompKL', 'CompMSE', 'OldNewMass', 'RoutePeak',
+                  'Components', 'MemCount', 'POVMError')
 
 
 def extract_router_metrics(stats):
@@ -16,7 +18,8 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
     summary = {
         'schema_version': 1,
         'status': status,
-        'method': 'QSD-Prompt' if args.prompt_router == 'qsd' else 'L2P',
+        'method': {'qsd': 'QSD-Prompt', 'qsd_comp': 'QSD Compositional Prompt',
+                   'cosine_comp': 'Cosine Compositional Prompt'}.get(args.prompt_router, 'L2P'),
         'dataset': args.dataset,
         'seed': int(args.seed),
         'prompt_router': args.prompt_router,
@@ -48,6 +51,12 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
         ],
     })
 
+    summary['final_new_task_acc'] = float(acc_matrix[completed - 1, completed - 1])
+    summary['final_old_task_acc'] = (float(acc_matrix[:completed - 1, completed - 1].mean())
+                                     if completed > 1 else None)
+    summary['new_minus_old_gap'] = (summary['final_new_task_acc'] - summary['final_old_task_acc']
+                                     if completed > 1 else None)
+
     if args.prompt_router == 'qsd':
         summary['qsd_config'] = {
             'state_dim': int(args.qsd_state_dim),
@@ -59,6 +68,21 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
             'no_cosine_prior': bool(args.qsd_no_cosine_prior),
         }
         summary['final_router_metrics'] = last.get('train_router_metrics', {})
+
+    if args.prompt_router in ('qsd_comp', 'cosine_comp'):
+        summary['compositional_config'] = {
+            name: getattr(args, name) for name in (
+                'epochs', 'batch_size', 'length', 'top_k', 'qsd_state_dim', 'qsd_rank',
+                'qsd_eps', 'qsd_cls_mix', 'qsd_cosine_tau', 'comp_components_per_task',
+                'comp_quantum_mix', 'comp_prototypes_per_class', 'comp_candidates_per_class',
+                'comp_memory_batch_size', 'comp_retention_coeff', 'comp_prompt_coeff')}
+        summary['compositional_config']['effective_quantum_mix'] = (
+            args.comp_quantum_mix if args.prompt_router == 'qsd_comp' else 0.0)
+        summary['compositional_config']['active_components'] = completed * args.comp_components_per_task
+        summary['compositional_config']['prompt_tokens'] = args.length * args.top_k
+        summary['final_router_metrics'] = last.get('eval_router_metrics', {})
+        summary['final_train_router_metrics'] = last.get('train_router_metrics', {})
+        summary['final_router_metrics_source'] = 'evaluation'
 
     return summary
 
@@ -95,6 +119,10 @@ def print_results_summary(summary, summary_path=None):
     print('Final average Acc@5    : {:.4f}'.format(summary['final_avg_acc5']))
     print('Forgetting             : {:.4f}'.format(summary['forgetting']))
     print('Backward transfer      : {:.4f}'.format(summary['backward_transfer']))
+    if summary.get('final_old_task_acc') is not None:
+        print('Old / new task Acc@1   : {:.4f} / {:.4f}'.format(
+            summary['final_old_task_acc'], summary['final_new_task_acc']))
+        print('New-minus-old gap      : {:.4f}'.format(summary['new_minus_old_gap']))
     print('Final per-task Acc@1   : {}'.format(
         ', '.join('{:.2f}'.format(value)
                   for value in summary['final_per_task_acc'])))

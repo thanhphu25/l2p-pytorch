@@ -1,5 +1,11 @@
 # L2P PyTorch Implementation
 
+The `qsd-compositional-prompt` branch adds soft quantum-state prompt composition,
+frozen task prompt banks, and class-prototype routing retention. See
+[the method, run commands and validation](docs/qsd_compositional.md).
+Run `bash train_qsd_compositional_cifar100.sh` for the 7-epoch CIFAR100 preset;
+use `ROUTER=cosine_comp` for the matching classical control.
+
 This repository contains PyTorch implementation code for awesome continual learning method <a href="https://openaccess.thecvf.com/content/CVPR2022/papers/Wang_Learning_To_Prompt_for_Continual_Learning_CVPR_2022_paper.pdf">L2P</a>, <br>
 Wang, Zifeng, et al. "Learning to prompt for continual learning." CVPR. 2022.
 

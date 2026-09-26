@@ -23,9 +23,12 @@ import numpy as np
 
 from timm.utils import accuracy
 from timm.optim import create_optimizer
+from timm.scheduler import create_scheduler
 
 import utils
+from compositional_prompt import CompositionalPrompt
 from result_summary import (
+    ROUTER_METRICS,
     build_results_summary,
     extract_router_metrics,
     save_results_summary,
@@ -47,6 +50,13 @@ def _update_router_metrics(metric_logger, output, batch_size):
         'qsd_strength': 'QSDStr',
         'route_entropy': 'RouteEnt',
         'qsd_retention_loss': 'QSDRet',
+        'comp_retention_loss': 'CompKL',
+        'comp_prompt_loss': 'CompMSE',
+        'old_new_mass': 'OldNewMass',
+        'route_peak': 'RoutePeak',
+        'active_components': 'Components',
+        'memory_count': 'MemCount',
+        'povm_error': 'POVMError',
     }
     for output_name, meter_name in names.items():
         if output_name in output:
@@ -99,6 +109,9 @@ def train_one_epoch(model: torch.nn.Module, original_model: torch.nn.Module,
             loss = loss - args.pull_constraint_coeff * output['reduce_sim']
         if 'qsd_retention_loss' in output:
             loss = loss + args.qsd_retention_coeff * output['qsd_retention_loss']
+        if 'comp_retention_loss' in output:
+            loss = loss + args.comp_retention_coeff * output['comp_retention_loss']
+            loss = loss + args.comp_prompt_coeff * output['comp_prompt_loss']
 
         acc1, acc5 = accuracy(logits, target, topk=(1, 5))
 
@@ -186,7 +199,7 @@ def evaluate(model: torch.nn.Module, original_model: torch.nn.Module, data_loade
 def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, data_loader, 
                     device, task_id=-1, class_mask=None, acc_matrix=None, args=None,):
     stat_matrix = np.zeros((3, args.num_tasks)) # 3 for Acc@1, Acc@5, Loss
-    router_metrics = {name: [] for name in ('QSDEnt', 'QSDPur', 'QSDStr', 'RouteEnt', 'QSDRet')}
+    router_metrics = {name: [] for name in ROUTER_METRICS}
 
     for i in range(task_id+1):
         test_stats = evaluate(model=model, original_model=original_model, data_loader=data_loader[i]['val'], 
@@ -233,6 +246,36 @@ def evaluate_till_now(model: torch.nn.Module, original_model: torch.nn.Module, d
     }
     return test_stats, task_summary
 
+@torch.no_grad()
+def consolidate_compositional_memory(prompt, original_model, loader, device, labels, budget):
+    """Use only this task's TRAIN loader; keep a bounded candidate set per class."""
+    original_model.eval()
+    candidates = {int(label): [[], [], 0] for label in labels}
+    print('Collecting train-only density prototypes (up to {} candidates/class)'.format(budget))
+    for inputs, targets in loader:
+        output = original_model(inputs.to(device, non_blocking=True))
+        queries, states = prompt.encode_states(
+            output['pre_logits'], _prompt_query_from_original(output))
+        for label in targets.unique().tolist():
+            if label not in candidates:
+                raise ValueError('Prototype loader contains a class outside the current task')
+            query_list, state_list, count = candidates[label]
+            remaining = budget - count
+            if remaining <= 0:
+                continue
+            indices = (targets == label).nonzero(as_tuple=True)[0][:remaining].to(device)
+            query_list.append(queries[indices].cpu())
+            state_list.append(states[indices].cpu())
+            candidates[label][2] += len(indices)
+        if all(value[2] >= budget for value in candidates.values()):
+            break
+    for label, (queries, states, count) in candidates.items():
+        if not count:
+            raise ValueError('No training prototype candidates found for class {}'.format(label))
+        prompt.consolidate_class(label, torch.cat(queries), torch.cat(states))
+    print('Stored density prototypes:', int(prompt.memory_valid.sum()))
+
+
 def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer, lr_scheduler, device: torch.device, 
                     class_mask=None, args = None,):
@@ -240,8 +283,14 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
     # create matrix to save end-of-task accuracies 
     acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
     task_summaries = []
+    compositional = isinstance(getattr(model_without_ddp, 'prompt', None), CompositionalPrompt)
 
     for task_id in range(args.num_tasks):
+        if compositional:
+            model_without_ddp.prompt.begin_task(task_id)
+            # Rebuild AFTER freezing old banks, also rebinding the scheduler.
+            optimizer = create_optimizer(args, model_without_ddp)
+            lr_scheduler = create_scheduler(args, optimizer)[0] if args.sched != 'constant' else None
        # Transfer previous learned prompt params to the new prompt
         if args.prompt_pool and args.shared_prompt_pool:
             if task_id > 0:
@@ -287,7 +336,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
                         optimizer.param_groups[0]['params'] = model.parameters()
      
         # Create new optimizer for each task to clear optimizer status
-        if task_id > 0 and args.reinit_optimizer:
+        if not compositional and task_id > 0 and args.reinit_optimizer:
             optimizer = create_optimizer(args, model)
         
         for epoch in range(args.epochs):            
@@ -299,6 +348,11 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
             if lr_scheduler:
                 lr_scheduler.step(epoch)
 
+        if compositional:
+            consolidate_compositional_memory(
+                model_without_ddp.prompt, original_model, data_loader[task_id]['train'],
+                device, class_mask[task_id], args.comp_candidates_per_class)
+
         test_stats, task_summary = evaluate_till_now(
             model=model, original_model=original_model, data_loader=data_loader,
             device=device, task_id=task_id, class_mask=class_mask,
@@ -309,7 +363,7 @@ def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Modul
         # Retain only the task's mean density state and measurement outcome.
         # Consolidate before checkpointing so evaluation-only runs restore the
         # exact continual-learning state.
-        if hasattr(model_without_ddp, 'prompt'):
+        if hasattr(model_without_ddp, 'prompt') and not compositional:
             model_without_ddp.prompt.consolidate_router()
 
         if args.output_dir and utils.is_main_process():

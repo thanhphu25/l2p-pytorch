@@ -11,6 +11,7 @@ import argparse
 import datetime
 import os
 import random
+import inspect
 import numpy as np
 import time
 import torch
@@ -31,12 +32,14 @@ from result_summary import (
 )
 import models
 import utils
+from compositional_prompt import validate_compositional_args
 
 import warnings
 warnings.filterwarnings('ignore', 'Argument interpolation should be of type InterpolationMode instead of int')
 
 def main(args):
     utils.init_distributed_mode(args)
+    validate_compositional_args(args)
 
     device = torch.device(args.device)
 
@@ -87,6 +90,11 @@ def main(args):
         qsd_cosine_tau=args.qsd_cosine_tau,
         qsd_memory_size=args.qsd_memory_size,
         qsd_no_cosine_prior=args.qsd_no_cosine_prior,
+        comp_num_tasks=args.num_tasks,
+        comp_components_per_task=args.comp_components_per_task,
+        comp_quantum_mix=args.comp_quantum_mix,
+        comp_prototypes_per_class=args.comp_prototypes_per_class,
+        comp_memory_batch_size=args.comp_memory_batch_size,
     )
     original_model.to(device)
     model.to(device)  
@@ -111,7 +119,18 @@ def main(args):
             checkpoint_path = os.path.join(args.output_dir, 'checkpoint/task{}_checkpoint.pth'.format(task_id+1))
             if os.path.exists(checkpoint_path):
                 print('Loading checkpoint from:', checkpoint_path)
-                checkpoint = torch.load(checkpoint_path)
+                # These are this run's own checkpoints (including argparse args).
+                load_options = {'map_location': 'cpu'}
+                if 'weights_only' in inspect.signature(torch.load).parameters:
+                    load_options['weights_only'] = False
+                checkpoint = torch.load(checkpoint_path, **load_options)
+                if args.prompt_router in ('qsd_comp', 'cosine_comp'):
+                    for name in ('prompt_router', 'num_tasks', 'length', 'top_k',
+                                 'qsd_state_dim', 'qsd_rank', 'qsd_eps', 'qsd_cls_mix',
+                                 'qsd_cosine_tau', 'comp_components_per_task',
+                                 'comp_quantum_mix', 'comp_prototypes_per_class'):
+                        if getattr(args, name) != getattr(checkpoint['args'], name):
+                            raise ValueError('Evaluation configuration differs from checkpoint: ' + name)
                 model.load_state_dict(checkpoint['model'])
             else:
                 print('No checkpoint found at:', checkpoint_path)
@@ -167,6 +186,12 @@ def main(args):
     experiment_summary['total_training_seconds'] = float(total_time)
     experiment_summary['total_training_time'] = total_time_str
     experiment_summary['trainable_parameters'] = int(n_parameters)
+    if args.prompt_router in ('qsd_comp', 'cosine_comp'):
+        experiment_summary['prompt_capacity_parameters'] = sum(
+            p.numel() for p in model_without_ddp.prompt.parameters())
+        experiment_summary['prototype_memory_bytes'] = sum(
+            b.numel() * b.element_size() for name, b in model_without_ddp.prompt.named_buffers()
+            if name.startswith('memory_'))
     if utils.is_main_process():
         summary_path = save_results_summary(experiment_summary, args.output_dir)
         print_results_summary(experiment_summary, summary_path)

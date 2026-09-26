@@ -41,6 +41,7 @@ from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_n
 from timm.models.registry import register_model
 
 from prompt import Prompt
+from compositional_prompt import CompositionalPrompt
 
 _logger = logging.getLogger(__name__)
 
@@ -337,7 +338,9 @@ class VisionTransformer(nn.Module):
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
             top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
             prompt_router='cosine', qsd_state_dim=16, qsd_rank=4, qsd_eps=1e-4, qsd_cls_mix=0.5,
-            qsd_cosine_tau=0.1, qsd_memory_size=10, qsd_no_cosine_prior=False,):
+            qsd_cosine_tau=0.1, qsd_memory_size=10, qsd_no_cosine_prior=False,
+            comp_num_tasks=10, comp_components_per_task=5, comp_quantum_mix=0.5,
+            comp_prototypes_per_class=4, comp_memory_batch_size=32,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -394,7 +397,17 @@ class VisionTransformer(nn.Module):
         self.head_type = head_type
         self.use_prompt_mask = use_prompt_mask
         
-        if prompt_length is not None and pool_size is not None and prompt_pool: 
+        if prompt_router in ('qsd_comp', 'cosine_comp'):
+            if not prompt_pool or prompt_length is None or pool_size is None or use_prompt_mask:
+                raise ValueError('Compositional prompts require a prompt pool without task masks')
+            self.prompt = CompositionalPrompt(
+                embed_dim=embed_dim, length=prompt_length, heads=top_k,
+                num_tasks=comp_num_tasks, components_per_task=comp_components_per_task,
+                num_classes=num_classes, state_dim=qsd_state_dim, rank=qsd_rank,
+                eps=qsd_eps, cls_mix=qsd_cls_mix, cosine_tau=qsd_cosine_tau,
+                quantum_mix=comp_quantum_mix, prototypes_per_class=comp_prototypes_per_class,
+                memory_batch_size=comp_memory_batch_size, router=prompt_router)
+        elif prompt_length is not None and pool_size is not None and prompt_pool:
             self.prompt = Prompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key, prompt_init=prompt_init,
                     prompt_pool=prompt_pool, prompt_key=prompt_key, pool_size=pool_size, top_k=top_k, batchwise_prompt=batchwise_prompt,
                     prompt_key_init=prompt_key_init, prompt_router=prompt_router, qsd_state_dim=qsd_state_dim,
