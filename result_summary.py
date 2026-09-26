@@ -57,6 +57,7 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
         'dataset': args.dataset,
         'seed': int(args.seed),
         'prompt_router': args.prompt_router,
+        'batchwise_prompt': bool(getattr(args, 'batchwise_prompt', True)),
         'tasks_completed': completed,
         'num_tasks': int(args.num_tasks),
         'task_summaries': task_summaries,
@@ -104,6 +105,9 @@ def build_results_summary(args, task_summaries, acc_matrix, status='running'):
             'rank': int(args.density_rank),
             'eps': float(args.density_eps),
             'fusion_weight': float(args.density_fusion_weight),
+            'pgm_ranks': [int(rank) for rank in getattr(args, 'density_pgm_ranks', [])],
+            'lda_ridge': float(args.density_eps if getattr(args, 'density_lda_ridge', None) is None
+                               else args.density_lda_ridge),
         }
         summary['density_heads'] = heads
 

@@ -94,7 +94,8 @@ def main(args):
         model.density_heads = DensityHeads(
             args.density_sources, args.nb_classes, model.embed_dim,
             rank=args.density_rank, eps=args.density_eps,
-            fusion_weight=args.density_fusion_weight)
+            fusion_weight=args.density_fusion_weight,
+            pgm_ranks=args.density_pgm_ranks, lda_ridge=args.density_lda_ridge)
     original_model.to(device)
     model.to(device)  
 

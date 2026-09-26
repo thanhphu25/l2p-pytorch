@@ -1,8 +1,9 @@
 # L2P PyTorch Implementation
 
-## Branch `qsd-density-head`: quantum state discrimination at the classifier
+## Branch `complete-measurement`: QSD class heads with classical controls
 
-L2P training is unchanged. With `--density_head`, every seen class is also
+Stage 1 of complete-measurement prompting: L2P training is unchanged. With
+`--density_head`, every seen class is also
 stored as a trace-one rank-r density matrix built from its training features
 (read with the evaluation transform), and each test image is classified as a
 pure state `|x><x|`. One run evaluates all read-outs side by side against
@@ -12,9 +13,25 @@ L2P's own linear head:
 | --- | --- |
 | `linear` | L2P classifier (baseline, same run) |
 | `<src>_ncm` | cosine to the class mean (classical prototype control) |
+| `<src>_ncm_centered` | ncm after subtracting the mean of the seen class means |
+| `<src>_ncm_white` | ncm after whitening by the PGM's `S^-1/2` (whitening without Born) |
 | `<src>_fidelity` | Born rule without measurement design, `p_c ~ <x|sigma_c|x>` |
 | `<src>_pgm` | pretty-good measurement: `E_c = S^-1/2 (sigma_c + eps I)/M S^-1/2`, `sum_c E_c = I` |
+| `<src>_pgm_r<k>` | the same PGM with states truncated to rank k (`--density_pgm_ranks`, default 8 16) |
+| `<src>_lda` | classical control: shared-covariance Gaussian posterior, ridge `lda_ridge * tr(Sigma)` |
 | `<src>_fusion` | `log_softmax(linear) + w * log p_pgm` |
+| `<src>_lda_fusion` | `log_softmax(linear) + w * log p_lda` (matched classical fusion) |
+| `<src>_fusion_r<k>` | fusion with the rank-k PGM (memory/accuracy trade-off) |
+
+The PGM ridge `eps` acts on trace-one states, so `--density_lda_ridge`
+defaults to the same fraction of the LDA covariance trace. LDA adds one shared
+`768 x 768` float64 scatter matrix per source (4.7 MB).
+
+`--no_batchwise_prompt` selects prompts per image. The original
+`--batchwise_prompt` uses `type=bool`, so `--batchwise_prompt False` still
+enables the batch majority vote, which sees task-pure test batches.
+`results_summary.json` records `batchwise_prompt`. `compare_heads.py` pools
+several runs' summaries and checks the stage-1 decision gates.
 
 `<src>` is `frozen` (frozen ViT CLS; old class states never drift) or
 `prompted` (L2P's prompted features at the end of each class's task; these
@@ -32,6 +49,8 @@ python main.py cifar100_l2p ... --density_head \
 forgetting, BWT, accuracy matrix per head). Because the heads are stored in
 the checkpoints, `--eval` re-runs can sweep `--density_eps` and
 `--density_fusion_weight` without retraining (`--density_rank` must match).
+Checkpoints from the older `qsd-density-head` branch lack the LDA buffers and
+do not load here.
 
 This repository contains PyTorch implementation code for awesome continual learning method <a href="https://openaccess.thecvf.com/content/CVPR2022/papers/Wang_Learning_To_Prompt_for_Continual_Learning_CVPR_2022_paper.pdf">L2P</a>, <br>
 Wang, Zifeng, et al. "Learning to prompt for continual learning." CVPR. 2022.

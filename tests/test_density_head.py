@@ -47,7 +47,7 @@ class DensityClassBankTest(unittest.TestCase):
         bank = DensityClassBank(num_classes=5, dim=6, rank=2, eps=1e-3).double()
         for label in range(4):
             bank.add_class(label, torch.randn(10, 6, dtype=torch.double))
-        root = bank._pgm_root()
+        root = bank._pgm_root(torch.arange(4))
         states = [bank.vectors[c] @ torch.diag(bank.values[c]) @ bank.vectors[c].T for c in range(4)]
         effects = [root @ ((s + bank.eps * torch.eye(6, dtype=torch.double)) / 4) @ root for s in states]
         torch.testing.assert_close(sum(effects), torch.eye(6, dtype=torch.double))
@@ -110,9 +110,88 @@ class DensityClassBankTest(unittest.TestCase):
         linear = torch.zeros(2, 6)
         linear[:, 5] = 100.0  # unseen class with a huge logit must never win
         logits = heads.head_logits(linear, {'frozen': torch.randn(2, 4)})
-        self.assertEqual(set(logits), {'frozen_ncm', 'frozen_fidelity', 'frozen_pgm', 'frozen_fusion'})
+        self.assertEqual(set(logits), {'frozen_' + name for name in (
+            'ncm', 'ncm_centered', 'ncm_white', 'fidelity', 'pgm', 'lda', 'fusion', 'lda_fusion')})
         for value in logits.values():
             self.assertTrue(set(value.argmax(-1).tolist()) <= {0, 3})
+
+
+class ClassicalControlTest(unittest.TestCase):
+    def setUp(self):
+        torch.manual_seed(10961)
+
+    def gaussian_bank(self, **kwargs):
+        bank = DensityClassBank(num_classes=4, dim=6, **kwargs).double()
+        mix = torch.randn(6, 6, dtype=torch.double)
+        samples = [torch.randn(30, 6, dtype=torch.double) @ mix + 3 * torch.randn(6, dtype=torch.double)
+                   for _ in range(3)]
+        for label, features in enumerate(samples):
+            bank.add_class(label, features)
+        return bank, samples
+
+    def test_lda_matches_the_closed_form_shared_covariance_posterior(self):
+        bank, samples = self.gaussian_bank(rank=3, eps=1e-3, lda_ridge=0.05)
+        units = [F.normalize(s, dim=-1) for s in samples]
+        means = torch.stack([u.mean(0) for u in units])
+        scatter = sum((u - m).T @ (u - m) for u, m in zip(units, means))
+        covariance = scatter / sum(len(u) for u in units)
+        covariance = covariance + 0.05 * covariance.trace() * torch.eye(6, dtype=torch.double)
+        x = torch.randn(5, 6, dtype=torch.double)
+        unit = F.normalize(x, dim=-1)
+        precision = torch.linalg.inv(covariance)
+        logits = unit @ precision @ means.T - 0.5 * torch.einsum('cd,de,ce->c', means, precision, means)
+        lda = bank.scores(x, readouts=('lda',))['lda']
+        torch.testing.assert_close(lda[:, :3], logits.log_softmax(-1))
+        self.assertTrue(torch.isinf(lda[:, 3]).all())
+        self.assertEqual(int(bank.scatter_count), 90)
+
+    def test_truncated_pgm_equals_a_bank_built_at_that_rank(self):
+        full, samples = self.gaussian_bank(rank=4, eps=1e-3, pgm_ranks=(2,))
+        small = DensityClassBank(num_classes=4, dim=6, rank=2, eps=1e-3).double()
+        for label, features in enumerate(samples):
+            small.add_class(label, features)
+        x = torch.randn(5, 6, dtype=torch.double)
+        scores = full.scores(x, readouts=('pgm',))
+        self.assertEqual(set(scores), {'pgm', 'pgm_r2'})
+        torch.testing.assert_close(scores['pgm_r2'], small.scores(x, readouts=('pgm',))['pgm'])
+        self.assertFalse(torch.allclose(scores['pgm_r2'][:, :3], scores['pgm'][:, :3]))
+        with self.assertRaises(ValueError):
+            DensityClassBank(num_classes=2, dim=6, rank=4, pgm_ranks=(4,))
+
+    def test_centered_and_whitened_ncm_follow_their_definitions(self):
+        bank, samples = self.gaussian_bank(rank=3, eps=1e-3)
+        x = torch.randn(5, 6, dtype=torch.double)
+        unit = F.normalize(x, dim=-1)
+        means = torch.stack([F.normalize(s, dim=-1).mean(0) for s in samples])
+        center = means.mean(0)
+        expected = F.normalize(unit - center, dim=-1) @ F.normalize(means - center, dim=-1).T
+        scores = bank.scores(x)
+        torch.testing.assert_close(scores['ncm_centered'][:, :3], expected)
+        root = bank._pgm_root(torch.arange(3))
+        expected = F.normalize(unit @ root, dim=-1) @ F.normalize(means @ root, dim=-1).T
+        torch.testing.assert_close(scores['ncm_white'][:, :3], expected)
+        # Plain ncm still uses the renormalized mean, as in the original head.
+        torch.testing.assert_close(scores['ncm'][:, :3], unit @ F.normalize(means, dim=-1).T)
+
+    def test_heads_add_lda_and_truncated_fusions(self):
+        heads = DensityHeads(['prompted'], num_classes=4, dim=6, rank=3, pgm_ranks=(1, 2))
+        for label in range(2):
+            heads.banks['prompted'].add_class(label, torch.randn(8, 6))
+        logits = heads.head_logits(torch.randn(3, 4), {'prompted': torch.randn(3, 6)})
+        for name in ('prompted_lda_fusion', 'prompted_fusion_r1', 'prompted_fusion_r2',
+                     'prompted_pgm_r1', 'prompted_pgm_r2'):
+            self.assertIn(name, logits)
+
+
+class CliTest(unittest.TestCase):
+    def test_batchwise_prompt_can_be_disabled(self):
+        parser = argparse.ArgumentParser()
+        get_args_parser(parser)
+        self.assertTrue(parser.parse_args([]).batchwise_prompt)
+        self.assertFalse(parser.parse_args(['--no_batchwise_prompt']).batchwise_prompt)
+        args = parser.parse_args([])
+        self.assertEqual(args.density_pgm_ranks, [8, 16])
+        self.assertIsNone(args.density_lda_ridge)
 
 
 class DensitySummaryTest(unittest.TestCase):
@@ -202,11 +281,14 @@ class DensityIntegrationTest(unittest.TestCase):
         heads = summary['density_heads']
         expected = {'linear'} | {'{}_{}'.format(source, readout)
                                  for source in ('frozen', 'prompted')
-                                 for readout in ('ncm', 'fidelity', 'pgm', 'fusion')}
+                                 for readout in ('ncm', 'ncm_centered', 'ncm_white', 'fidelity',
+                                                 'pgm', 'lda', 'fusion', 'lda_fusion')}
         self.assertEqual(set(heads), expected)
         self.assertEqual(heads['linear']['final_avg_acc'], summary['final_avg_acc'])
         self.assertEqual(len(heads['frozen_pgm']['accuracy_matrix']), 2)
         self.assertEqual(summary['density_config']['rank'], 3)
+        self.assertEqual(summary['density_config']['lda_ridge'], summary['density_config']['eps'])
+        self.assertTrue(summary['batchwise_prompt'])
         self.assertEqual(int(state['model']['density_heads.banks.frozen.valid'].sum()), 10)
 
         restored = self.model(self.args(density=True))

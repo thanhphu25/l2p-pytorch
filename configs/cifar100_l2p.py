@@ -87,6 +87,9 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--shared_prompt_pool', default=False, type=bool)
     subparsers.add_argument('--shared_prompt_key', default=False, type=bool)
     subparsers.add_argument('--batchwise_prompt', default=True, type=bool)
+    # type=bool turns any non-empty string, even 'False', into True; use this to disable.
+    subparsers.add_argument('--no_batchwise_prompt', action='store_false', dest='batchwise_prompt',
+                            help='select prompts per image instead of by batch majority vote')
     subparsers.add_argument('--embedding_key', default='cls', type=str)
     subparsers.add_argument('--predefined_key', default='', type=str)
     subparsers.add_argument('--pull_constraint', default=True)
