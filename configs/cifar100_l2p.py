@@ -86,6 +86,9 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--shared_prompt_pool', default=False, type=bool)
     subparsers.add_argument('--shared_prompt_key', default=False, type=bool)
     subparsers.add_argument('--batchwise_prompt', default=True, type=bool)
+    subparsers.add_argument('--no_batchwise_prompt', '--no-batchwise-prompt',
+                            dest='batchwise_prompt', action='store_false',
+                            help='select L2P token prompts independently for each image')
     subparsers.add_argument('--embedding_key', default='cls', type=str)
     subparsers.add_argument('--predefined_key', default='', type=str)
     subparsers.add_argument('--pull_constraint', default=True)

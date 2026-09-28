@@ -47,6 +47,9 @@ DATA_PATH=/kaggle/input/your-cifar100-path SEED=10961 \
   bash run_input_prompt_ablation.sh local_global --batch-size 32
 ~~~
 
+Use `--no_batchwise_prompt` to disable L2P's batch-majority token selection.
+The input-space router itself always selects spatial prompts per image.
+
 Recommended order is: `baseline`, `local`, `local_global`, `linear`,
 `quantum_no_phase`, then `quantum`. The comparisons answer different
 questions:
