@@ -41,6 +41,7 @@ from timm.models.layers import PatchEmbed, Mlp, DropPath, trunc_normal_, lecun_n
 from timm.models.registry import register_model
 
 from prompt import Prompt
+from input_prompt import InputSpatialPrompt
 
 _logger = logging.getLogger(__name__)
 
@@ -335,7 +336,11 @@ class VisionTransformer(nn.Module):
             class_token=True, no_embed_class=False, fc_norm=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
             weight_init='', embed_layer=PatchEmbed, norm_layer=None, act_layer=None, block_fn=Block,
             prompt_length=None, embedding_key='cls', prompt_init='uniform', prompt_pool=False, prompt_key=False, pool_size=None,
-            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,):
+            top_k=None, batchwise_prompt=False, prompt_key_init='uniform', head_type='token', use_prompt_mask=False,
+            input_prompt_mode='none', input_prompt_pool_size=10, input_prompt_top_k=5,
+            input_prompt_hidden_dim=8, input_prompt_global=False, input_prompt_frequency_rings=8,
+            input_prompt_max_scale=0.1, input_prompt_init_scale=0.01,
+            input_prompt_quantum_depth=2, input_prompt_temperature=1.0,):
         """
         Args:
             img_size (int, tuple): input image size
@@ -391,6 +396,22 @@ class VisionTransformer(nn.Module):
         self.prompt_pool = prompt_pool
         self.head_type = head_type
         self.use_prompt_mask = use_prompt_mask
+
+        self.input_prompt_mode = input_prompt_mode
+        if input_prompt_mode != 'none':
+            self.input_prompt = InputSpatialPrompt(
+                query_dim=embed_dim,
+                pool_size=input_prompt_pool_size,
+                top_k=input_prompt_top_k,
+                hidden_dim=input_prompt_hidden_dim,
+                router=input_prompt_mode,
+                global_prompt=input_prompt_global,
+                frequency_rings=input_prompt_frequency_rings,
+                max_scale=input_prompt_max_scale,
+                init_scale=input_prompt_init_scale,
+                quantum_depth=input_prompt_quantum_depth,
+                temperature=input_prompt_temperature,
+            )
         
         if prompt_length is not None and pool_size is not None and prompt_pool: 
             self.prompt = Prompt(length=prompt_length, embed_dim=embed_dim, embedding_key=embedding_key, prompt_init=prompt_init,
@@ -455,6 +476,9 @@ class VisionTransformer(nn.Module):
         self.head = nn.Linear(self.embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
     def forward_features(self, x, task_id=-1, cls_features=None, train=False):
+        input_prompt_res = dict()
+        if hasattr(self, 'input_prompt'):
+            x, input_prompt_res = self.input_prompt(x, cls_features)
         x = self.patch_embed(x)
 
         if hasattr(self, 'prompt'):
@@ -472,6 +496,7 @@ class VisionTransformer(nn.Module):
             x = res['prompted_embedding']
         else:
             res=dict()
+        res.update(input_prompt_res)
         if self.cls_token is not None:
             x = torch.cat((self.cls_token.expand(x.shape[0], -1, -1), x), dim=1)
         

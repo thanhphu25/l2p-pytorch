@@ -91,6 +91,20 @@ def get_args_parser(subparsers):
     subparsers.add_argument('--pull_constraint', default=True)
     subparsers.add_argument('--pull_constraint_coeff', default=0.1, type=float)
 
+    # Input-space prompt ablations (LGSP-inspired). 'none' is exact L2P.
+    subparsers.add_argument('--input-prompt-mode', default='none',
+                            choices=['none', 'cosine', 'linear', 'quantum', 'quantum_no_phase'])
+    subparsers.add_argument('--input-prompt-pool-size', default=10, type=int)
+    subparsers.add_argument('--input-prompt-top-k', default=5, type=int)
+    subparsers.add_argument('--input-prompt-hidden-dim', default=8, type=int)
+    subparsers.add_argument('--input-prompt-global', action='store_true',
+                            help='also enable the learnable concentric FFT filter')
+    subparsers.add_argument('--input-prompt-frequency-rings', default=8, type=int)
+    subparsers.add_argument('--input-prompt-max-scale', default=0.1, type=float)
+    subparsers.add_argument('--input-prompt-init-scale', default=0.01, type=float)
+    subparsers.add_argument('--input-prompt-quantum-depth', default=2, type=int)
+    subparsers.add_argument('--input-prompt-temperature', default=1.0, type=float)
+
     # ViT parameters
     subparsers.add_argument('--global_pool', default='token', choices=['token', 'avg'], type=str, help='type of global pooling for final sequence')
     subparsers.add_argument('--head_type', default='prompt', choices=['token', 'gap', 'prompt', 'token+prompt'], type=str, help='input type of classification head')

@@ -73,6 +73,16 @@ def main(args):
         prompt_key_init=args.prompt_key_init,
         head_type=args.head_type,
         use_prompt_mask=args.use_prompt_mask,
+        input_prompt_mode=getattr(args, 'input_prompt_mode', 'none'),
+        input_prompt_pool_size=getattr(args, 'input_prompt_pool_size', 10),
+        input_prompt_top_k=getattr(args, 'input_prompt_top_k', 5),
+        input_prompt_hidden_dim=getattr(args, 'input_prompt_hidden_dim', 8),
+        input_prompt_global=getattr(args, 'input_prompt_global', False),
+        input_prompt_frequency_rings=getattr(args, 'input_prompt_frequency_rings', 8),
+        input_prompt_max_scale=getattr(args, 'input_prompt_max_scale', 0.1),
+        input_prompt_init_scale=getattr(args, 'input_prompt_init_scale', 0.01),
+        input_prompt_quantum_depth=getattr(args, 'input_prompt_quantum_depth', 2),
+        input_prompt_temperature=getattr(args, 'input_prompt_temperature', 1.0),
     )
     original_model.to(device)
     model.to(device)  
