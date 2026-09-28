@@ -30,6 +30,11 @@ def test_forward_backward_and_normalized_weights(router):
     prompted.square().mean().backward()
     assert image.grad is not None
     assert torch.isfinite(image.grad).all()
+    assert all(parameter.grad is not None for parameter in module.parameters())
+
+    if router == 'quantum_no_phase':
+        phase_grad = module.quantum_router.phase_encoder.weight.grad
+        assert torch.count_nonzero(phase_grad) == 0
 
 
 def test_uniform_frequency_filter_starts_as_identity_residual():

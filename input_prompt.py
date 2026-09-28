@@ -82,7 +82,10 @@ class QuantumRouter(nn.Module):
 
         phase = self.phase_encoder(query).gather(1, selected_idx)
         if not self.use_data_phase:
-            phase = torch.zeros_like(phase)
+            # Keep the parameter-matched phase encoder in the autograd graph so
+            # DDP does not report unused parameters. Its value and gradients
+            # are exactly zero in this ablation.
+            phase = phase * 0.0
         state = torch.polar(amplitudes, math.pi * torch.tanh(phase))
         if self.state_dim > self.top_k:
             state = F.pad(state, (0, self.state_dim - self.top_k))
