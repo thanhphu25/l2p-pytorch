@@ -427,24 +427,28 @@ class CUB200(torch.utils.data.Dataset):
         self.url = 'https://data.deepai.org/CUB200(2011).zip'
         self.filename = 'CUB200(2011).zip'
 
-        fpath = os.path.join(root, self.filename)
-        if not os.path.isfile(fpath):
-            if not download:
-               raise RuntimeError('Dataset not found. You can use download=True to download it')
-            else:
-                print('Downloading from '+self.url)
-                download_url(self.url, root, filename=self.filename)
+        # an already split copy (CUB_200_2011/train, CUB_200_2011/test) is used as is, without the zip,
+        # so a read-only root works; an extracted but unsplit copy is only split
+        base = os.path.join(root, 'CUB_200_2011')
+        if not (os.path.isdir(os.path.join(base, 'train')) and os.path.isdir(os.path.join(base, 'test'))):
+            if not os.path.isfile(os.path.join(base, 'images.txt')):
+                fpath = os.path.join(root, self.filename)
+                if not os.path.isfile(fpath):
+                    if not download:
+                       raise RuntimeError('Dataset not found. You can use download=True to download it')
+                    else:
+                        print('Downloading from '+self.url)
+                        download_url(self.url, root, filename=self.filename)
 
-        if not os.path.exists(os.path.join(root, 'CUB_200_2011')):
-            import zipfile
-            zip_ref = zipfile.ZipFile(fpath, 'r')
-            zip_ref.extractall(root)
-            zip_ref.close()
+                import zipfile
+                zip_ref = zipfile.ZipFile(fpath, 'r')
+                zip_ref.extractall(root)
+                zip_ref.close()
 
-            import tarfile
-            tar_ref = tarfile.open(os.path.join(root, 'CUB_200_2011.tgz'), 'r')
-            tar_ref.extractall(root)
-            tar_ref.close()
+                import tarfile
+                tar_ref = tarfile.open(os.path.join(root, 'CUB_200_2011.tgz'), 'r')
+                tar_ref.extractall(root)
+                tar_ref.close()
 
             self.split()
         
@@ -457,8 +461,8 @@ class CUB200(torch.utils.data.Dataset):
         self.data = datasets.ImageFolder(fpath, transform=transform)
 
     def split(self):
-        train_folder = self.root + 'CUB_200_2011/train'
-        test_folder = self.root + 'CUB_200_2011/test'
+        train_folder = os.path.join(self.root, 'CUB_200_2011', 'train')
+        test_folder = os.path.join(self.root, 'CUB_200_2011', 'test')
 
         if os.path.exists(train_folder):
             rmtree(train_folder)
@@ -467,8 +471,8 @@ class CUB200(torch.utils.data.Dataset):
         os.mkdir(train_folder)
         os.mkdir(test_folder)
 
-        images = self.root + 'CUB_200_2011/images.txt'
-        train_test_split = self.root + 'CUB_200_2011/train_test_split.txt'
+        images = os.path.join(self.root, 'CUB_200_2011', 'images.txt')
+        train_test_split = os.path.join(self.root, 'CUB_200_2011', 'train_test_split.txt')
 
         with open(images, 'r') as image:
             with open(train_test_split, 'r') as f:
@@ -476,7 +480,7 @@ class CUB200(torch.utils.data.Dataset):
                     image_path = image.readline().split(' ')[-1]
                     image_path = image_path.replace('\n', '')
                     class_name = image_path.split('/')[0].split(' ')[-1]
-                    src = self.root + 'CUB_200_2011/images/' + image_path
+                    src = os.path.join(self.root, 'CUB_200_2011', 'images', image_path)
 
                     if line.split(' ')[-1].replace('\n', '') == '1':
                         if not os.path.exists(train_folder + '/' + class_name):

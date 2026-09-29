@@ -15,6 +15,7 @@ import uuid
 from pathlib import Path
 
 import main as l2p
+from density_head import add_density_args
 import submitit
 import datetime
 
@@ -49,6 +50,7 @@ def parse_args():
                         help='Comment to pass to scheduler, e.g. priority message')
 
     get_args_parser(config_parser)
+    add_density_args(config_parser)
 
     return parser.parse_args()
 

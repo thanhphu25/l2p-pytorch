@@ -23,6 +23,7 @@ from timm.optim import create_optimizer
 
 from datasets import build_continual_dataloader
 from engine import *
+from density_head import DensityHeads, HeadMetrics, add_density_args
 import models
 import utils
 
@@ -89,6 +90,17 @@ def main(args):
 
     print(args)
 
+    density, head_metrics = None, None
+    if args.density_heads:
+        if args.distributed and utils.get_world_size() > 1:
+            print('Warning: density heads do not aggregate statistics across processes; disabled under multi-GPU DDP')
+        else:
+            density = DensityHeads(args, dim=model.num_features)
+            head_metrics = HeadMetrics(args.num_tasks)
+            w2 = density.weight if density.weight2 is None else density.weight2
+            print(f'Density heads: sources={density.sources} rank={density.rank} ranks={density.ranks} '
+                  f'eps={args.density_eps} weight={density.weight} weight2={w2} lda_shrink={args.density_lda_shrink}')
+
     if args.eval:
         acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
 
@@ -98,11 +110,19 @@ def main(args):
                 print('Loading checkpoint from:', checkpoint_path)
                 checkpoint = torch.load(checkpoint_path)
                 model.load_state_dict(checkpoint['model'])
+                if density is not None:
+                    if 'density_bank' in checkpoint:
+                        # keep --density_ranks / fusion weights of this run, not the ones saved at training
+                        density.load_state_dict(checkpoint['density_bank'], use_saved_config=False)
+                    else:
+                        print('Warning: no density_bank in checkpoint; density heads skipped')
+                        density, head_metrics = None, None
             else:
                 print('No checkpoint found at:', checkpoint_path)
                 return
             _ = evaluate_till_now(model, original_model, data_loader, device, 
-                                            task_id, class_mask, acc_matrix, args,)
+                                            task_id, class_mask, acc_matrix, args,
+                                            density=density, head_metrics=head_metrics)
         
         return
 
@@ -134,7 +154,7 @@ def main(args):
 
     train_and_evaluate(model, model_without_ddp, original_model,
                     criterion, data_loader, optimizer, lr_scheduler,
-                    device, class_mask, args)
+                    device, class_mask, args, density=density, head_metrics=head_metrics)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -156,6 +176,7 @@ if __name__ == '__main__':
         raise NotImplementedError
     
     get_args_parser(config_parser)
+    add_density_args(config_parser)
 
     args = parser.parse_args()
 
