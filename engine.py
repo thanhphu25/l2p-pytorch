@@ -208,27 +208,53 @@ def _set_rng_state(state):
         torch.cuda.set_rng_state_all(state['cuda'])
 
 @torch.no_grad()
+def _forward_split(model: torch.nn.Module, original_model: torch.nn.Module, data_loader, device, task_id,
+                   class_mask=None, args=None):
+    """Features and logits of one split, with the same model call as evaluate()."""
+    model.eval()
+    original_model.eval()
+    out = {'frozen': [], 'prompted': [], 'logits': [], 'target': []}
+    for input, target in data_loader:
+        input = input.to(device, non_blocking=True)
+        cls_features = original_model(input)['pre_logits']
+        output = model(input, task_id=task_id, cls_features=cls_features)
+        logits = output['logits']
+        if args is not None and args.task_inc and class_mask is not None:
+            mask = torch.tensor(class_mask[task_id], dtype=torch.int64).to(device)
+            logits = logits + torch.ones_like(logits).mul(float('-inf')).index_fill(1, mask, 0.0)
+        out['frozen'].append(cls_features.float().cpu())
+        out['prompted'].append(output['pre_logits'].float().cpu())
+        out['logits'].append(logits.float().cpu())
+        out['target'].append(target.cpu())
+    return {k: torch.cat(v) for k, v in out.items()}
+
+@torch.no_grad()
 def consolidate_density_heads(model: torch.nn.Module, original_model: torch.nn.Module, data_loader,
                               device, task_id, density, args=None):
     """Add class states of the current task, using its train split with the eval transform.
     RNG state is restored afterwards so enabling the heads does not change later training."""
     rng_state = _get_rng_state()
-    model.eval()
-    original_model.eval()
-    feats = {s: [] for s in density.sources}
-    labels = []
-    for input, target in data_loader:
-        input = input.to(device, non_blocking=True)
-        cls_features = original_model(input)['pre_logits']
-        # same call as in evaluate(), so the stored prompted features follow the test-time path
-        output = model(input, task_id=task_id, cls_features=cls_features)
-        batch_feats = {'frozen': cls_features, 'prompted': output['pre_logits']}
-        for s in density.sources:
-            feats[s].append(batch_feats[s].float().cpu())
-        labels.append(target.cpu())
-    density.add_task({s: torch.cat(v) for s, v in feats.items()}, torch.cat(labels))
+    split = _forward_split(model, original_model, data_loader, device, task_id)
+    density.add_task({s: split[s] for s in density.sources}, split['target'])
     _set_rng_state(rng_state)
     print(f'Density heads: stored {len(density)} classes after task {task_id + 1}')
+
+@torch.no_grad()
+def dump_density_features(model: torch.nn.Module, original_model: torch.nn.Module, data_loader, device,
+                          task_id, class_mask=None, args=None):
+    """Save what density_sweep.py needs for checkpoint `task_id`: the train split of this task (eval transform,
+    as in consolidate_density_heads) and the test splits of all tasks seen so far (as in evaluate_till_now)."""
+    train = _forward_split(model, original_model, data_loader[task_id]['train_eval'], device, task_id)
+    test = [_forward_split(model, original_model, data_loader[i]['val'], device, i, class_mask, args)
+            for i in range(task_id + 1)]
+    accs = [100.0 * (t['logits'].argmax(1) == t['target']).float().mean().item() for t in test]
+    Path(args.density_dump_dir).mkdir(parents=True, exist_ok=True)
+    path = os.path.join(args.density_dump_dir, f'task{task_id + 1}.pt')
+    torch.save(dict(task=task_id + 1, num_tasks=args.num_tasks,
+                    train=dict(frozen=train['frozen'], prompted=train['prompted'], labels=train['target']),
+                    test=test), path)
+    print(f'[Dump task {task_id + 1}] {path}  Acc@1 per task: ' + ' '.join(f'{a:.2f}' for a in accs)
+          + f'  avg {np.mean(accs):.4f}')
 
 def train_and_evaluate(model: torch.nn.Module, model_without_ddp: torch.nn.Module, original_model: torch.nn.Module, 
                     criterion, data_loader: Iterable, optimizer: torch.optim.Optimizer, lr_scheduler, device: torch.device, 

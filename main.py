@@ -99,7 +99,8 @@ def main(args):
             head_metrics = HeadMetrics(args.num_tasks)
             w2 = density.weight if density.weight2 is None else density.weight2
             print(f'Density heads: sources={density.sources} rank={density.rank} ranks={density.ranks} '
-                  f'eps={args.density_eps} weight={density.weight} weight2={w2} lda_shrink={args.density_lda_shrink}')
+                  f'eps={args.density_eps} weight={density.weight} weight2={w2} lda_weight={density.lda_weight} '
+                  f'lda_shrink={args.density_lda_shrink}')
 
     if args.eval:
         acc_matrix = np.zeros((args.num_tasks, args.num_tasks))
@@ -120,6 +121,9 @@ def main(args):
             else:
                 print('No checkpoint found at:', checkpoint_path)
                 return
+            if args.density_dump_dir:
+                dump_density_features(model, original_model, data_loader, device, task_id, class_mask, args)
+                continue
             _ = evaluate_till_now(model, original_model, data_loader, device, 
                                             task_id, class_mask, acc_matrix, args,
                                             density=density, head_metrics=head_metrics)

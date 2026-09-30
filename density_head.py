@@ -40,6 +40,11 @@ def add_density_args(parser):
     parser.add_argument('--density_fusion_weight', default=1.0, type=float, help='weight of log p_pgm in fusion')
     parser.add_argument('--density_fusion_weight2', default=None, type=float,
                         help='weight of log p_pgm(prompted) in dual_pgm_fusion (default: --density_fusion_weight)')
+    parser.add_argument('--density_lda_weight', default=None, type=float,
+                        help='weight of log p_lda in lda_fusion, i.e. inverse LDA temperature (default: --density_fusion_weight)')
+    parser.add_argument('--density_dump_dir', default='', type=str,
+                        help='with --eval: save train/test features of every checkpoint here for density_sweep.py '
+                             'instead of evaluating')
     parser.add_argument('--density_lda_shrink', default=0.1, type=float,
                         help='LDA covariance shrinkage towards (trace/D) I')
 
@@ -154,6 +159,7 @@ class DensityHeads:
         self.ranks = sorted({k for k in args.density_ranks if 0 < k < self.rank})
         self.weight = args.density_fusion_weight
         self.weight2 = getattr(args, 'density_fusion_weight2', None)
+        self.lda_weight = getattr(args, 'density_lda_weight', None)
         self.banks = {s: ClassBank(dim, self.rank, args.density_eps, args.density_lda_shrink) for s in self.sources}
 
     @property
@@ -224,7 +230,8 @@ class DensityHeads:
             lda = bank.lda(dev)
             lda_scores = f @ lda['Pm'].T + lda['bias']
             preds[f'{s}_lda'] = pick(lda_scores)
-            preds[f'{s}_lda_fusion'] = pick(log_lin + self.weight * F.log_softmax(lda_scores, dim=1))
+            w_lda = self.weight if self.lda_weight is None else self.lda_weight
+            preds[f'{s}_lda_fusion'] = pick(log_lin + w_lda * F.log_softmax(lda_scores, dim=1))
 
         if self.dual:
             w2 = self.weight if self.weight2 is None else self.weight2
@@ -235,7 +242,8 @@ class DensityHeads:
 
     def state_dict(self):
         return dict(sources=self.sources, rank=self.rank, ranks=self.ranks, weight=self.weight,
-                    weight2=self.weight2, banks={s: b.state_dict() for s, b in self.banks.items()})
+                    weight2=self.weight2, lda_weight=self.lda_weight,
+                    banks={s: b.state_dict() for s, b in self.banks.items()})
 
     def load_state_dict(self, state, use_saved_config=True):
         """use_saved_config=False keeps ranks / weights from the current args (offline --eval sweeps);
@@ -247,6 +255,7 @@ class DensityHeads:
             self.ranks = list(state['ranks'])
             self.weight = state['weight']
             self.weight2 = state.get('weight2')
+            self.lda_weight = state.get('lda_weight')
         else:
             self.ranks = sorted(k for k in self.ranks if 0 < k < self.rank)
 
